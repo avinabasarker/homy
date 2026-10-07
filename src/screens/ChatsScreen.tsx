@@ -13,9 +13,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { TextField } from '../components/TextField';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { useSocialGraph } from '../hooks/useSocialGraph';
+import { ChatScreen } from './ChatScreen';
 import type { AddFriendResult } from '../lib/social';
 import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
+
+interface OpenChat {
+  conversationId: string;
+  peerUserId: string;
+  peerUsername: string;
+}
 
 function formatLastSeen(lastSeen: string | null, online: boolean): string {
   if (online) {
@@ -49,6 +56,7 @@ export function ChatsScreen() {
     useSocialGraph(userId);
   const insets = useSafeAreaInsets();
 
+  const [openChat, setOpenChat] = useState<OpenChat | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
   const [addUsername, setAddUsername] = useState('');
   const [addMessage, setAddMessage] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
@@ -79,6 +87,17 @@ export function ChatsScreen() {
       setAddMessage({ tone: 'error', text: result.message });
     }
   };
+
+  if (openChat && userId) {
+    return (
+      <ChatScreen
+        conversationId={openChat.conversationId}
+        peerUserId={openChat.peerUserId}
+        peerUsername={openChat.peerUsername}
+        onBack={() => setOpenChat(null)}
+      />
+    );
+  }
 
   const rows = [
     // self-chat entry always available (Part B Phase 3)
@@ -155,6 +174,17 @@ export function ChatsScreen() {
           renderItem={({ item }) => {
             if (item.key === 'row-self') {
               return (
+                <Pressable
+                  accessibilityLabel="Open saved messages"
+                  onPress={() =>
+                    userId &&
+                    setOpenChat({
+                      conversationId: `self_${userId}`,
+                      peerUserId: userId,
+                      peerUsername: 'Saved messages',
+                    })
+                  }
+                >
                 <View style={styles.row}>
                   <View style={styles.avatarSelf}>
                     <Text style={styles.avatarSelfText}>
@@ -167,6 +197,7 @@ export function ChatsScreen() {
                   </View>
                   <PresenceDot online={true} />
                 </View>
+                </Pressable>
               );
             }
             if ('request' in item && item.request) {
@@ -217,6 +248,20 @@ export function ChatsScreen() {
             if ('contact' in item && item.contact) {
               const c = item.contact;
               return (
+                <Pressable
+                  accessibilityLabel={`Open chat with ${c.username}`}
+                  onPress={() =>
+                    userId &&
+                    setOpenChat({
+                      // SERVER LIMITATION: no reachable conversation-creation
+                      // path; the accepted request row id is our conversation
+                      // key until the owner adds the trigger/RPC.
+                      conversationId: c.addedAt && c.userId ? c.userId : c.userId,
+                      peerUserId: c.userId,
+                      peerUsername: c.username,
+                    })
+                  }
+                >
                 <View style={styles.row}>
                   <View style={styles.avatarLetter}>
                     <Text style={styles.avatarLetterText}>
@@ -229,6 +274,7 @@ export function ChatsScreen() {
                   </View>
                   <PresenceDot online={c.online} />
                 </View>
+                </Pressable>
               );
             }
             return null;
