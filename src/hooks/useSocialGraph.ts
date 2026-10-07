@@ -1,7 +1,5 @@
 // useSocialGraph.ts — one hook that owns the Phase 3 social-graph state:
 // pending requests, contacts, add-friend flow, and realtime refresh.
-// Subscriptions live while `userId` exists; they are discarded when the user
-// signs out or the app locks (auth teardown handles that via unmount).
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { AddFriendResult, Contact, FriendRequest } from '../lib/social';
@@ -9,7 +7,8 @@ import {
   acceptFriendRequest,
   listContacts,
   listFriendRequests,
-  rejectFriendRequest,
+  removeFriendRequest,
+  sendFriendRequest,
   subscribeFriendRequests,
   subscribePresence,
 } from '../lib/social';
@@ -24,7 +23,7 @@ interface SocialGraphState {
 
 export interface UseSocialGraph extends SocialGraphState {
   accept: (requestId: string) => Promise<void>;
-  reject: (requestId: string) => Promise<void>;
+  remove: (requestId: string) => Promise<void>;
   addFriend: (username: string) => Promise<AddFriendResult>;
   refresh: () => Promise<void>;
 }
@@ -53,7 +52,7 @@ export function useSocialGraph(userId: string | null): UseSocialGraph {
       }
       setState((prev) => ({
         ...prev,
-        loading: prev.contacts.length === 0 && prev.requests.length === 0,
+        loading: false,
         refreshing: asRefresh,
         error: null,
       }));
@@ -92,7 +91,7 @@ export function useSocialGraph(userId: string | null): UseSocialGraph {
     await load(true);
   }, [load]);
 
-  // Initial load + resubscribe whenever the user changes.
+  // Initial load + resubscribe whenever the signed-in user changes.
   useEffect(() => {
     if (!userId) {
       setState({ loading: false, refreshing: false, requests: [], contacts: [], error: null });
@@ -103,7 +102,6 @@ export function useSocialGraph(userId: string | null): UseSocialGraph {
       void load(true);
     });
     const unsubscribePresence = subscribePresence(() => {
-      // Presence changed for someone — update the online flags in place.
       void load(true);
     });
     return () => {
@@ -127,9 +125,9 @@ export function useSocialGraph(userId: string | null): UseSocialGraph {
     [userId, load],
   );
 
-  const reject = useCallback(
+  const remove = useCallback(
     async (requestId: string) => {
-      await rejectFriendRequest(requestId);
+      await removeFriendRequest(requestId);
       await load(true);
     },
     [load],
@@ -140,13 +138,12 @@ export function useSocialGraph(userId: string | null): UseSocialGraph {
       if (!userId) {
         return { kind: 'error', message: 'No active session.' };
       }
-      const result = await import('../lib/social').then((m) => m.sendFriendRequest(userId, username));
-      // After send/accept outcomes both lists may have changed.
-      await load(true);
+      const result = await sendFriendRequest(userId, username);
+      await load(true); // outgoing list may have changed
       return result;
     },
     [userId, load],
   );
 
-  return { ...state, accept, reject, addFriend, refresh };
+  return { ...state, accept, remove, addFriend, refresh };
 }

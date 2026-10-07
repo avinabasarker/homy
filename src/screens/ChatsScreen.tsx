@@ -45,7 +45,7 @@ function PresenceDot({ online }: { online: boolean }) {
 
 export function ChatsScreen() {
   const { userId } = useAuth();
-  const { loading, refreshing, requests, contacts, error, accept, reject, addFriend, refresh } =
+  const { loading, refreshing, requests, contacts, error, accept, remove, addFriend, refresh } =
     useSocialGraph(userId);
   const insets = useSafeAreaInsets();
 
@@ -74,9 +74,6 @@ export function ChatsScreen() {
   const handleAddResult = (result: AddFriendResult) => {
     if (result.kind === 'sent') {
       setAddMessage({ tone: 'ok', text: 'Request sent!' });
-      setAddUsername('');
-    } else if (result.kind === 'accepted') {
-      setAddMessage({ tone: 'ok', text: 'You are now contacts!' });
       setAddUsername('');
     } else {
       setAddMessage({ tone: 'error', text: result.message });
@@ -199,7 +196,7 @@ export function ChatsScreen() {
                       </Pressable>
                       <Pressable
                         accessibilityLabel={`Reject request from ${r.otherUsername}`}
-                        onPress={() => void reject(r.id)}
+                        onPress={() => void remove(r.id)}
                         style={[styles.actionBtn, styles.rejectBtn]}
                       >
                         <Text style={[styles.actionText, styles.rejectText]}>Reject</Text>
@@ -208,7 +205,7 @@ export function ChatsScreen() {
                   ) : (
                     <Pressable
                       accessibilityLabel={`Withdraw request to ${r.otherUsername}`}
-                      onPress={() => void reject(r.id)}
+                      onPress={() => void remove(r.id)}
                       style={[styles.actionBtn, styles.rejectBtn]}
                     >
                       <Text style={[styles.actionText, styles.rejectText]}>Cancel</Text>
