@@ -11,6 +11,7 @@ import {
   useFonts,
 } from '@expo-google-fonts/inter';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { SecurityScrim } from './src/components/SecurityScrim';
 import { RootTabs } from './src/navigation/RootTabs';
@@ -78,13 +79,15 @@ export default function App() {
   }
 
   return (
-    <AuthProvider>
-      <View style={styles.container}>
-        <StatusBar style="light" />
-        <AppBody />
-        {appState !== 'active' && <SecurityScrim />}
-      </View>
-    </AuthProvider>
+    <SafeAreaProvider>
+      <AuthProvider>
+        <View style={styles.container}>
+          <StatusBar style="light" />
+          <AppBody />
+          {appState !== 'active' && <SecurityScrim />}
+        </View>
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }
 
