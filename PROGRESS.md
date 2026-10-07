@@ -1,8 +1,8 @@
 # Homy — PROGRESS.md
 
 **Project:** Homy (Private E2EE Android Messenger) — v2.1 full rebuild
-**Current phase:** Phase 3 — Social Graph (code complete + server-verified; awaiting device verification)
-**Typecheck:** `npx tsc --noEmit` ✅ zero errors (last run: end of Phase 3 build)
+**Current phase:** Phase 4 — E2EE Messaging Core (code complete + crypto verified; server conversation-creation blocked; awaiting device verification)
+**Typecheck:** `npx tsc --noEmit` ✅ zero errors (last run: end of Phase 4 build)
 
 ---
 
@@ -85,6 +85,77 @@
 
 ---
 
+## Phase 4 — E2EE Messaging Core
+
+### What was built
+- `src/lib/crypto.ts` — pair-key E2EE: shared = scalarmult(mySK, theirPK);
+  conversation key = hash(shared ∥ sorted identity pks); seal/open via
+  nacl.secretbox + random 24-byte nonce. tweetnacl only, no custom crypto.
+- `src/lib/messages.ts` — fetch peer identity key from `public_keys`,
+  encrypt, insert into `messages` (\x hex bytea per Part E), list+decrypt
+  thread oldest-first, realtime INSERT subscription per conversation.
+- `src/screens/ChatScreen.tsx` — bubbles (mine accent/right, theirs
+  surface/left), composer with Send, undecryptable messages render as
+  "🔒 Encrypted message" instead of failing.
+- `src/screens/ChatsScreen.tsx` — tapping a contact OR "Saved messages
+  (you)" opens the chat (local stack state; no new navigation dependency).
+- `src/components/SecurityScrim.tsx` — FIXED for SDK 57: content now
+  wrapped in `BlurTargetView` with `blurTarget` ref (was silently falling
+  back to no blur on Android; that was the warning in your Metro logs).
+
+### Crypto verification (run locally, NOT on device)
+Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
+- Both sides derive the SAME 32-byte pair key ✔
+- Unicode message round-trips byte-perfect ✔
+- Tampered ciphertext rejected (secretbox auth) ✔
+- Third party (Carol) cannot decrypt Alice→Bob traffic ✔
+
+### Blocked (Phase 4) — SERVER SIDE, OWNER ACTION NEEDED
+- `messages` INSERT is RLS-rejected (42501) unless a matching
+  `conversations` row exists. No conversation row is created by request
+  acceptance (verified: select returns [] for both parties after accept).
+- No reachable RPC can create one (10 common names probed — all missing).
+- The `conversations` table's membership column could not be identified
+  (60+ candidate names rejected by the PostgREST schema cache; empty
+  inserts hit RLS before column validation).
+- CONSEQUENCE: in-app sends will show the honest error "The server rejected
+  the message because the conversation row does not exist yet…" until the
+  owner adds, in Supabase (SQL editor), EITHER a trigger on
+  friend_requests UPDATE pending→accepted that inserts the conversation
+  row (with whatever membership columns the schema has) OR an RPC the app
+  can call. The app needs no change once that exists — messages.ts already
+  writes conversation_id and will start working.
+- Interim mapping: ChatScreen conversation id = the accepted request row's
+  OTHER PARTY user id — update after owner adds the trigger if the server
+  expects a different id.
+
+### Phase 4 owner tests (after Phase 3 owner tests 1–14 pass)
+1. As alice: tap the contact row `bob_test`.
+   EXPECT chat screen opens: header `bob_test` + "End-to-end encrypted",
+   empty thread shows "No messages yet. Say Hi!".
+2. Type "Say Hi!" → Send.
+   EXPECT (current blocked state) the red honest error about the missing
+   conversation row — this is CORRECT behavior until the owner adds the
+   server trigger/RPC described in Blocked above. After the owner adds it:
+   EXPECT the bubble appears on the right in accent purple with a timestamp.
+3. As bob (device 2): open chat with alice.
+   EXPECT alice's message arrives within ~2 s WITHOUT refresh (realtime),
+   rendered as a grey bubble on the left.
+4. As bob: reply "Hi alice!" → EXPECT bob's bubble on the right.
+5. As alice: bob's reply appears within ~2 s without refresh.
+6. Force-close alice's app → reopen → PIN → open chat with bob.
+   EXPECT full history reloads from the server and DECRYPTS (keys persisted
+   in SecureStore; session key derived deterministically from identity keys).
+7. On bob's device: logout → login (new prekey uploaded, identity keys kept).
+   EXPECT alice's history still decrypts (pair key depends only on identity
+   keys, which do not rotate).
+8. Tamper check (advanced, optional): in Supabase → Table editor → messages,
+   hand-edit one ciphertext byte of bob's message. Reload alice's chat.
+   EXPECT that one message renders as "🔒 Encrypted message" and the rest
+   render normally (secretbox auth failure is contained per-message).
+
+---
+
 ---
 
 ## Phase 2 — Supabase & Auth
@@ -130,12 +201,13 @@
 ## Roadmap
 - [x] Phase 1 — Foundation & UI Shell
 - [x] Phase 2 — Supabase & Auth
-- [x] Phase 3 — Social Graph (this section)
-- [ ] Phase 4 — E2EE Messaging Core
+- [x] Phase 3 — Social Graph
+- [x] Phase 4 — E2EE Messaging Core (this section; blocked on server conversation creation)
 - [ ] Phase 5 — Chat UX (Pixel-Perfect)
 - [ ] Phase 6 — Interactions
 - [ ] Phase 7 — Media & Voice
 - [ ] Phase 8 — Multi-Device, Ship & Infra
 
-**Next step:** owner runs the Phase 3 owner tests above, then Phase 4
-(E2EE messaging core) continues per the user's standing instruction.
+**Next step:** owner runs Phase 3 + Phase 4 owner tests; adds the missing
+conversation-creation trigger/RPC in Supabase (see Blocked). Phase 5
+(Chat UX polish) proceeds after that per the master prompt.

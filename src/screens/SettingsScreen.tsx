@@ -39,7 +39,7 @@ export function SettingsScreen() {
 
       <View style={styles.section}>
         <PrimaryButton label="Log out" variant="ghost" onPress={handleLogout} loading={loggingOut} />
-        <Text style={styles.version}>Homy v2.1 · Phase 2</Text>
+        <Text style={styles.version}>Homy v2.1 · Phase 4</Text>
       </View>
     </View>
   );
