@@ -1,28 +1,45 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { PrimaryButton } from '../components/PrimaryButton';
+import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
 
-/** Phase 1 placeholder — auth and account settings arrive in Phase 2. */
 export function SettingsScreen() {
+  const { username, logout } = useAuth();
   const insets = useSafeAreaInsets();
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await logout();
+    } finally {
+      setLoggingOut(false);
+    }
+  };
 
   return (
     <View style={styles.container}>
       <View style={[styles.header, { paddingTop: insets.top + spacing.md }]}>
         <Text style={styles.headerTitle}>Settings</Text>
       </View>
+
       <View style={styles.card}>
         <View style={styles.avatar}>
           <View style={styles.head} />
           <View style={styles.torso} />
         </View>
-        <Text style={styles.cardTitle}>You are signed out</Text>
+        <Text style={styles.cardTitle}>{username ? `@${username}` : 'Signed in'}</Text>
         <Text style={styles.cardBody}>
-          Account and security settings will appear here after you register or
-          sign in.
+          End-to-end encrypted. Your keys are stored on this device only.
         </Text>
+      </View>
+
+      <View style={styles.section}>
+        <PrimaryButton label="Log out" variant="ghost" onPress={handleLogout} loading={loggingOut} />
+        <Text style={styles.version}>Homy v2.1 · Phase 2</Text>
       </View>
     </View>
   );
@@ -83,6 +100,16 @@ const styles = StyleSheet.create({
   cardBody: {
     fontSize: 13,
     fontFamily: fontFamily.regular,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  section: {
+    paddingHorizontal: spacing.md,
+    gap: spacing.md,
+  },
+  version: {
+    fontSize: 11,
+    fontFamily: fontFamily.medium,
     color: colors.textSecondary,
     textAlign: 'center',
   },

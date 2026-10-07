@@ -1,7 +1,7 @@
 import './polyfills';
 
 import React, { useEffect, useState } from 'react';
-import { AppState } from 'react-native';
+import { AppState, StyleSheet, View } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import {
@@ -14,6 +14,10 @@ import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 
 import { SecurityScrim } from './src/components/SecurityScrim';
 import { RootTabs } from './src/navigation/RootTabs';
+import { AuthFlow } from './src/screens/AuthFlow';
+import { PinScreen } from './src/screens/PinScreen';
+import { RecoveryPhraseScreen } from './src/screens/RecoveryPhraseScreen';
+import { AuthProvider, useAuth } from './src/state/AuthProvider';
 import { colors } from './src/theme/theme';
 
 const navigationTheme = {
@@ -29,6 +33,31 @@ const navigationTheme = {
     notification: colors.accent,
   },
 };
+
+function AppBody() {
+  const { status } = useAuth();
+
+  if (status === 'initializing') {
+    return <View style={styles.container} />;
+  }
+  if (status === 'signedOut') {
+    return <AuthFlow />;
+  }
+  if (status === 'recoveryGate') {
+    return <RecoveryPhraseScreen />;
+  }
+  if (status === 'pinSetup') {
+    return <PinScreen mode="setup" />;
+  }
+  if (status === 'locked') {
+    return <PinScreen mode="unlock" />;
+  }
+  return (
+    <NavigationContainer theme={navigationTheme}>
+      <RootTabs />
+    </NavigationContainer>
+  );
+}
 
 export default function App() {
   const [fontsLoaded] = useFonts({
@@ -49,10 +78,19 @@ export default function App() {
   }
 
   return (
-    <NavigationContainer theme={navigationTheme}>
-      <StatusBar style="light" />
-      <RootTabs />
-      {appState !== 'active' && <SecurityScrim />}
-    </NavigationContainer>
+    <AuthProvider>
+      <View style={styles.container}>
+        <StatusBar style="light" />
+        <AppBody />
+        {appState !== 'active' && <SecurityScrim />}
+      </View>
+    </AuthProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+});
