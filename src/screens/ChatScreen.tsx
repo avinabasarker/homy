@@ -11,7 +11,10 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
 
+import { Bubble } from '../components/Bubble';
+import { EmptyState } from '../components/EmptyState';
 import {
   ensureConversation,
   listMessages,
@@ -45,7 +48,11 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [revealedTimeId, setRevealedTimeId] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatMessage> | null>(null);
+  // Ids present at mount; only messages arriving afterwards animate in.
+  const initialIdsRef = useRef<Set<string> | null>(null);
+  const prevCountRef = useRef(0);
 
   useEffect(() => {
     if (!userId) {
@@ -70,6 +77,8 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
         if (cancelled) {
           return;
         }
+        initialIdsRef.current = new Set(thread.map((m) => m.id));
+        prevCountRef.current = thread.length;
         setMessages(thread);
       } catch (err) {
         if (!cancelled) {
@@ -92,6 +101,17 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
     }
     try {
       const thread = await listMessages(peerUserId, userId, keys);
+      // NEW incoming message while the screen is open → light haptic.
+      // NEVER fires for my own sends (senderId === userId) and never on
+      // UI clicks. Strictly growing count guards against replays.
+      if (
+        thread.length > prevCountRef.current &&
+        thread[thread.length - 1] &&
+        thread[thread.length - 1].senderId !== userId
+      ) {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+      prevCountRef.current = thread.length;
       setMessages(thread);
       setError(null);
     } catch (err) {
@@ -130,19 +150,33 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
     }
   };
 
-  const renderBubble = ({ item }: { item: ChatMessage }) => {
+  const revealedIdRef = useRef<string | null>(null);
+  revealedIdRef.current = revealedTimeId;
+
+  const handleLongPress = useCallback((id: string) => {
+    setRevealedTimeId((prev) => (prev === id ? null : id));
+  }, []);
+
+  const renderBubble = ({ index }: { index: number }) => {
+    const item = messages[index];
+    if (!item) {
+      return null;
+    }
     const mine = item.senderId === userId;
+    const prev = index > 0 ? messages[index - 1] : undefined;
+    // Grouping: consecutive bubbles from the same sender; only the LAST
+    // bubble of a group carries the tail.
+    const lastOfGroup = !messages[index + 1] || messages[index + 1].senderId !== item.senderId;
+    const animate = !(initialIdsRef.current?.has(item.id) ?? false);
     return (
-      <View style={[styles.bubbleRow, mine ? styles.bubbleRowMine : null]}>
-        <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs]}>
-          <Text style={styles.bubbleText}>
-            {item.undecryptable ? '🔒 Encrypted message' : item.body}
-          </Text>
-          <Text style={styles.bubbleTime}>
-            {new Date(item.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </Text>
-        </View>
-      </View>
+      <Bubble
+        item={item}
+        mine={mine}
+        lastOfGroup={lastOfGroup}
+        animate={animate}
+        showTime={revealedIdRef.current === item.id}
+        onLongPress={handleLongPress}
+      />
     );
   };
 
@@ -166,9 +200,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           <ActivityIndicator color={colors.accent} />
         </View>
       ) : messages.length === 0 && !error ? (
-        <View style={styles.center}>
-          <Text style={styles.emptyText}>No messages yet. Say Hi!</Text>
-        </View>
+        <EmptyState />
       ) : (
         <FlatList
           ref={listRef}

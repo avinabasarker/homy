@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -14,6 +14,8 @@ import { TextField } from '../components/TextField';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { useSocialGraph } from '../hooks/useSocialGraph';
 import { ChatScreen } from './ChatScreen';
+import { listLastMessages, loadMyIdentityKeys } from '../lib/messages';
+import type { ThreadPreview } from '../lib/messages';
 import type { AddFriendResult } from '../lib/social';
 import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
@@ -49,6 +51,26 @@ function PresenceDot({ online }: { online: boolean }) {
   return <View style={[styles.dot, online ? styles.dotOnline : styles.dotOffline]} />;
 }
 
+/** Relative time for the conversation-list preview: "now", "5m", "3h", "Tue". */
+function formatRelativeTime(sentAt: string | null): string {
+  if (!sentAt) {
+    return '';
+  }
+  const date = new Date(sentAt);
+  const mins = Math.floor((Date.now() - date.getTime()) / 60000);
+  if (mins < 1) {
+    return 'now';
+  }
+  if (mins < 60) {
+    return `${mins}m`;
+  }
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+  return date.toLocaleDateString([], { weekday: 'short' });
+}
+
 export function ChatsScreen() {
   const { userId } = useAuth();
   const { loading, refreshing, requests, contacts, error, accept, remove, addFriend, refresh } =
@@ -56,6 +78,7 @@ export function ChatsScreen() {
   const insets = useSafeAreaInsets();
 
   const [openChat, setOpenChat] = useState<OpenChat | null>(null);
+  const [previews, setPreviews] = useState<Map<string, ThreadPreview>>(new Map());
   const [showAddForm, setShowAddForm] = useState(false);
   const [addUsername, setAddUsername] = useState('');
   const [addMessage, setAddMessage] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
@@ -63,6 +86,38 @@ export function ChatsScreen() {
 
   const incoming = requests.filter((r) => r.direction === 'incoming');
   const outgoing = requests.filter((r) => r.direction === 'outgoing');
+
+  // Last-message previews: decrypted via the existing messages API only.
+  // Reloads whenever the identity keys or the contact list changes.
+  useEffect(() => {
+    if (!userId) {
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const mine = await loadMyIdentityKeys(userId);
+        if (!mine) {
+          return;
+        }
+        const peerIds = [...contacts.map((c) => c.userId), userId];
+        const map = await listLastMessages(peerIds, userId, {
+          ...mine,
+          theirIdentityPublicKey: new Uint8Array(0),
+        });
+        if (!cancelled) {
+          setPreviews(map);
+        }
+      } catch {
+        if (!cancelled) {
+          setPreviews(new Map());
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, contacts, openChat]);
 
   const handleAddFriend = async () => {
     if (!addUsername.trim()) {
@@ -192,9 +247,13 @@ export function ChatsScreen() {
                   </View>
                   <View style={styles.rowMain}>
                     <Text style={styles.rowTitle}>Saved messages (you)</Text>
-                    <Text style={styles.rowSub}>A private chat with yourself</Text>
+                    <Text style={styles.rowSub} numberOfLines={1}>
+                      {previews.get(userId ?? '')?.body || 'A private chat with yourself'}
+                    </Text>
                   </View>
-                  <PresenceDot online={true} />
+                  <Text style={styles.previewTime}>
+                    {formatRelativeTime(previews.get(userId ?? '')?.sentAt ?? null)}
+                  </Text>
                 </View>
                 </Pressable>
               );
@@ -265,9 +324,16 @@ export function ChatsScreen() {
                   </View>
                   <View style={styles.rowMain}>
                     <Text style={styles.rowTitle}>{c.username}</Text>
-                    <Text style={styles.rowSub}>{formatLastSeen(c.lastSeen, c.online)}</Text>
+                    <Text style={styles.rowSub} numberOfLines={1}>
+                      {previews.get(c.userId)?.body || formatLastSeen(c.lastSeen, c.online)}
+                    </Text>
                   </View>
-                  <PresenceDot online={c.online} />
+                  <View style={styles.rowEnd}>
+                    <Text style={styles.previewTime}>
+                      {formatRelativeTime(previews.get(c.userId)?.sentAt ?? null)}
+                    </Text>
+                    <PresenceDot online={c.online} />
+                  </View>
                 </View>
                 </Pressable>
               );
@@ -362,6 +428,16 @@ const styles = StyleSheet.create({
   rowMain: {
     flex: 1,
     gap: 2,
+  },
+  rowEnd: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  previewTime: {
+    fontSize: 11,
+    fontFamily: fontFamily.medium,
+    color: colors.textSecondary,
   },
   rowTitle: {
     fontSize: 16,

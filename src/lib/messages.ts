@@ -187,6 +187,50 @@ export async function listMessages(
   });
 }
 
+export interface ThreadPreview {
+  /** Decrypted last-message body, or a locked placeholder for undecryptable rows. */
+  body: string;
+  sentAt: string | null;
+  fromMe: boolean;
+}
+
+/**
+ * Read-only helper for the conversation list (Phase 5): decrypts the last
+ * message of each conversation for preview purposes. Uses ONLY existing
+ * primitives — no new writes, no schema knowledge beyond messages.ts's own.
+ */
+export async function listLastMessages(
+  peerIds: string[],
+  myUserId: string,
+  keys: PairKeys,
+): Promise<Map<string, ThreadPreview>> {
+  const map = new Map<string, ThreadPreview>();
+  if (peerIds.length === 0) {
+    return map;
+  }
+  await Promise.all(
+    peerIds.map(async (peerId) => {
+      try {
+        const thread = await listMessages(peerId, myUserId, keys);
+        const last = thread[thread.length - 1];
+        if (!last) {
+          map.set(peerId, { body: '', sentAt: null, fromMe: false });
+        } else {
+          map.set(peerId, {
+            body: last.undecryptable ? '🔒 Encrypted message' : last.body,
+            sentAt: last.sentAt,
+            fromMe: last.senderId === myUserId,
+          });
+        }
+      } catch {
+        // Preview is decorative — a failed conversation never breaks the list.
+        map.set(peerId, { body: '', sentAt: null, fromMe: false });
+      }
+    }),
+  );
+  return map;
+}
+
 /** Live updates for one conversation; returns unsubscribe. */
 export function subscribeMessages(
   peerUserId: string,

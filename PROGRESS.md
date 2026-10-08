@@ -1,8 +1,111 @@
 # Homy — PROGRESS.md
 
 **Project:** Homy (Private E2EE Android Messenger) — v2.1 full rebuild
-**Current phase:** Phase 4 — E2EE Messaging Core (code complete + crypto verified; server conversation-creation blocked; awaiting device verification)
-**Typecheck:** `npx tsc --noEmit` ✅ zero errors (last run: end of Phase 4 build)
+**Current phase:** Phase 5 — Chat UX Pixel-Perfect (code complete; awaiting device verification)
+**Typecheck:** `npx tsc --noEmit` ✅ zero errors (last run: end of Phase 5 build)
+
+---
+
+## Phase 5 — Chat UX (Pixel-Perfect)
+
+### What was built (presentation ONLY — zero changes to crypto/messages/social logic)
+- `src/components/Bubble.tsx` — NEW bubble component: 16px radius; sender
+  RIGHT on accent `#5E5CE6`; receiver LEFT on surface `#1E1E1E`; text
+  15sp/400. Tail is a corner-cut (4px) on the LAST bubble of a
+  consecutive-sender group; grouped bubbles carry no tail.
+- `src/screens/ChatScreen.tsx` — REBUILT:
+  - Grouping: consecutive messages from one sender group; gapless look.
+  - Timestamps HIDDEN by default; long-press a bubble toggles its time
+    (11sp/500, `#A0A0B0`). Long-press again (or another bubble) hides.
+  - Entrance animation via `react-native-reanimated` 4 (worklets on the
+    UI thread): fade + slide-up + springy pop, 60fps. Messages already in
+    the thread at mount do NOT animate — only newly arrived/sent ones do.
+  - Empty thread renders `EmptyState` (silhouette + "No messages yet.
+    Say Hi!") per Part C.
+- Haptics via `expo-haptics`: LIGHT impact ONLY when a message from the
+  OTHER party arrives while the chat is open. Never on send, never on UI
+  clicks. Guarded by sender-id check + strictly-growing message count.
+- `src/lib/messages.ts` — one ADDITION (read-only, reuses existing
+  primitives): `listLastMessages(peerIds, myUserId, keys)` decrypts the
+  last message per conversation for list previews. No writes, no new
+  tables, no schema knowledge added.
+- `src/screens/ChatsScreen.tsx` — contact rows now show: letter avatar,
+  DECRYPTED last-message preview (one line, numberOfLines=1), relative
+  time ("now" / "5m" / "3h" / weekday). Self-chat row stays on top and
+  gets its own preview. Request rows keep Accept/Reject/Cancel actions.
+- Empty states per Part C: chat uses `EmptyState` (silhouette + "No
+  messages yet. Say Hi!"); list keeps its existing empty text.
+- Dependencies added via `npx expo install` (SDK-57-matched):
+  `react-native-reanimated@4.5.1`, `react-native-worklets@0.10.1`,
+  `expo-haptics@~57.0.3`. No babel config needed — babel-preset-expo
+  auto-configures the worklets plugin.
+
+### Single-device test: inject a fake incoming message (Supabase SQL editor)
+
+**⚠️ LABEL: THIS IS A DELIBERATELY UNDECRYPTABLE MESSAGE.** It will render
+as 🔒 "Encrypted message" — that is CORRECT and expected. The point is to
+trigger the REALTIME subscription on your device while the chat is open,
+so you can verify the pop-in ANIMATION and the HAPTIC buzz. Delete the row
+afterwards (see step 5).
+
+Run this in Supabase → SQL Editor while the chat is OPEN on your device
+(replace `<ALICE_UUID>`, `<BOB_UUID>`, `<CONVERSATION_UUID>` — get all
+three from Table editor → conversations / profiles):
+
+```sql
+-- 1) Find the conversation (first party = whoever is logged in on the
+--    device that will RECEIVE the fake message is NOT required — either
+--    participant works; the receiving device must be either user_a/user_b).
+--    If you already know the conversation id, skip this SELECT.
+select id, user_a, user_b from conversations
+where user_a = '<ALICE_UUID>' or user_b = '<ALICE_UUID>';
+
+-- 2) Insert the fake message. 24-byte nonce = 48 hex chars; 32-byte
+--    ciphertext = 64 hex chars. Both are VALID bytea shapes so the row is
+--    well-formed, but the plaintext is random garbage — secretbox auth
+--    will fail on decrypt, which is exactly what we want to observe.
+insert into messages (conversation_id, sender_id, ciphertext, nonce)
+values (
+  '<CONVERSATION_UUID>'::uuid,
+  '<OTHER_PARTY_UUID_NOT_THE_DEVICE_OWNER>'::uuid,
+  decode('00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff', 'hex'),
+  decode('00112233445566778899aabbccddeeff0011223344556677', 'hex')
+);
+
+-- 3) (verification on device) The bubble should pop in with the
+--    slide-up+spring animation, the phone should buzz ONCE (light), and
+--    the bubble text should read "🔒 Encrypted message".
+
+-- 4) Long-press it → the timestamp appears; long-press again → hides.
+
+-- 5) Clean up:
+delete from messages
+where conversation_id = '<CONVERSATION_UUID>'::uuid
+  and ciphertext = decode('00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff', 'hex');
+```
+
+### Phase 5 owner tests (single phone + SQL editor)
+1. Open any chat with history. EXPECT: bubbles grouped by sender; only the
+   bottom bubble of each group has the tail corner-cut; no timestamps
+   visible.
+2. Long-press any bubble → EXPECT its timestamp (HH:MM) appears bottom-
+   right inside the bubble, 11sp grey. Long-press the same bubble again →
+   EXPECT hidden. Long-press a different bubble → EXPECT only that one
+   shows a time.
+3. Send "test 3" → EXPECT it pops in with slide-up + spring on the RIGHT
+   (accent). NO vibration on send.
+4. Run the fake-message INSERT above with the chat open. EXPECT: one
+   light vibration, the 🔒 bubble pops in on the LEFT (surface grey) with
+   the same animation, no timestamp visible.
+5. Navigate back to Chats. EXPECT the contact row shows "🔒 Encrypted
+   message" (or your last real message) as the one-line preview, plus a
+   relative time on the right ("now").
+6. Run the DELETE above. Reopen the chat → EXPECT the 🔒 bubble gone.
+7. Fresh account with no messages: EXPECT the EmptyState silhouette +
+   "No messages yet. Say Hi!" in the chat; the Chats list keeps its own
+   empty text.
+8. Scroll-smoothness: send 10+ messages in a row. EXPECT no dropped
+   frames while bubbles animate in (worklets run off the JS thread).
 
 ---
 
@@ -200,12 +303,11 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - [x] Phase 2 — Supabase & Auth
 - [x] Phase 3 — Social Graph
 - [x] Phase 4 — E2EE Messaging Core (conversation creation FIXED — server RPC)
-- [ ] Phase 5 — Chat UX (Pixel-Perfect)
+- [x] Phase 5 — Chat UX (Pixel-Perfect) (this section)
 - [ ] Phase 6 — Interactions
 - [ ] Phase 7 — Media & Voice
 - [ ] Phase 8 — Multi-Device, Ship & Infra
 
-**Next step:** owner runs Phase 3 + Phase 4 owner tests (the Phase 4
-messaging list below is rewritten for a single device with account
-switching). Phase 5 (Chat UX polish) proceeds after that per the master
-prompt.
+**Next step:** owner runs Phase 3 + Phase 4 owner tests, then the Phase 5
+single-device list above (with the fake-message SQL INSERT for testing
+animations/haptics without a second phone).
