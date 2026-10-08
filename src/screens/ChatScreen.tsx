@@ -163,7 +163,6 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
       return null;
     }
     const mine = item.senderId === userId;
-    const prev = index > 0 ? messages[index - 1] : undefined;
     // Grouping: consecutive bubbles from the same sender; only the LAST
     // bubble of a group carries the tail.
     const lastOfGroup = !messages[index + 1] || messages[index + 1].senderId !== item.senderId;
