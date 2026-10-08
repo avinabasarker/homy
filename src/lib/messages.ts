@@ -42,8 +42,73 @@ export interface ChatMessage {
   senderId: string;
   body: string;
   sentAt: string;
+  /** Set when the message was edited (server column edited_at). */
+  editedAt?: string | null;
   /** True when decryption failed (wrong key/tampered) — shown as a placeholder. */
   undecryptable?: boolean;
+  /** Hours after sentAt when this message disappears; null/0 = never. */
+  disappearHours?: number | null;
+}
+
+// ---- Envelope v1 (Phase 6) ----
+//
+// Message plaintext is a JSON envelope: { v: 1, type, body, disappearHours }.
+// Legacy rows (pre-Phase 6) are plain UTF-8 strings — decodePlain handles BOTH:
+// it tries the envelope first and falls back to treating the plaintext as the
+// body itself, so existing history keeps rendering instead of turning 🔒.
+// Reactions and disappearing flags travel INSIDE encrypted payloads — never
+// in plaintext columns.
+
+export const ENVELOPE_VERSION = 1;
+
+export type EnvelopeType = 'text' | 'reaction';
+
+export interface Envelope {
+  v: number;
+  type: EnvelopeType;
+  body: string;
+  disappearHours?: number | null;
+}
+
+function buildEnvelope(body: string, disappearHours: number | null): string {
+  const env: Envelope = { v: ENVELOPE_VERSION, type: 'text', body };
+  if (disappearHours && disappearHours > 0) {
+    env.disappearHours = disappearHours;
+  }
+  return JSON.stringify(env);
+}
+
+/**
+ * Decode decrypted plaintext: v:1 envelope → structured fields; anything
+ * else (legacy plain string, or garbage) → body text with no extras.
+ */
+function decodePlain(plain: Uint8Array): {
+  body: string;
+  disappearHours: number | null;
+  isReaction: boolean;
+} {
+  const text = bytesToUtf8(plain);
+  try {
+    const parsed = JSON.parse(text) as Partial<Envelope> | null;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      parsed.v === ENVELOPE_VERSION &&
+      typeof parsed.body === 'string'
+    ) {
+      return {
+        body: parsed.body,
+        disappearHours:
+          typeof parsed.disappearHours === 'number' && parsed.disappearHours > 0
+            ? parsed.disappearHours
+            : null,
+        isReaction: parsed.type === 'reaction',
+      };
+    }
+  } catch {
+    // Not JSON — legacy plain-string message.
+  }
+  return { body: text, disappearHours: null, isReaction: false };
 }
 
 interface MessageRow {
@@ -53,6 +118,7 @@ interface MessageRow {
   ciphertext: string;
   nonce: string;
   sent_at: string;
+  edited_at?: string | null;
 }
 
 interface PublicKeyRow {
@@ -118,6 +184,7 @@ export async function sendMessage(
   myUserId: string,
   keys: PairKeys,
   text: string,
+  disappearHours: number | null = null,
 ): Promise<void> {
   const theirPk =
     keys.theirIdentityPublicKey.length > 0
@@ -128,7 +195,7 @@ export async function sendMessage(
     theirPk,
     keys.myIdentityPublicKey,
   );
-  const { ciphertext, nonce } = seal(utf8ToBytes(text), pairKey);
+  const { ciphertext, nonce } = seal(utf8ToBytes(buildEnvelope(text, disappearHours)), pairKey);
 
   const conversationId = await ensureConversation(peerUserId);
   const { error } = await supabase.from('messages').insert({
@@ -164,7 +231,7 @@ export async function listMessages(
   const conversationId = await ensureConversation(peerUserId);
   const { data, error } = await supabase
     .from('messages')
-    .select('id, conversation_id, sender_id, ciphertext, nonce, sent_at')
+    .select('id, conversation_id, sender_id, ciphertext, nonce, sent_at, edited_at')
     .eq('conversation_id', conversationId)
     .order('sent_at', { ascending: true });
   if (error) {
@@ -177,14 +244,82 @@ export async function listMessages(
       fromPostgrestBytea(row.nonce),
       pairKey,
     );
+    if (!plain) {
+      return {
+        id: row.id,
+        senderId: row.sender_id,
+        body: '',
+        sentAt: row.sent_at,
+        editedAt: row.edited_at ?? null,
+        undecryptable: true,
+        disappearHours: null,
+      } satisfies ChatMessage;
+    }
+    const decoded = decodePlain(plain);
     return {
       id: row.id,
       senderId: row.sender_id,
-      body: plain ? bytesToUtf8(plain) : '',
+      body: decoded.body,
       sentAt: row.sent_at,
-      undecryptable: !plain,
+      editedAt: row.edited_at ?? null,
+      disappearHours: decoded.disappearHours,
+      undecryptable: false,
     } satisfies ChatMessage;
   });
+}
+
+// ---- Edit + delete for everyone (Phase 6) ----
+
+const EDIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour, mirrors the server policy
+
+export function isEditable(sentAt: string): boolean {
+  return Date.now() - new Date(sentAt).getTime() < EDIT_WINDOW_MS;
+}
+
+/**
+ * Replace the encrypted payload of MY message with a new envelope
+ * (server enforces the 1-hour window; a rejection surfaces honestly).
+ */
+export async function editMessage(
+  peerUserId: string,
+  myUserId: string,
+  keys: PairKeys,
+  messageId: string,
+  newText: string,
+): Promise<void> {
+  const theirPk =
+    keys.theirIdentityPublicKey.length > 0
+      ? keys.theirIdentityPublicKey
+      : await fetchPeerIdentityKey(peerUserId);
+  const pairKey = derivePairKey(
+    keys.myIdentitySecretKey,
+    theirPk,
+    keys.myIdentityPublicKey,
+  );
+  const { ciphertext, nonce } = seal(utf8ToBytes(buildEnvelope(newText, null)), pairKey);
+  const { error } = await supabase
+    .from('messages')
+    .update({ ciphertext: toPostgrestBytea(ciphertext), nonce: toPostgrestBytea(nonce), edited_at: new Date().toISOString() })
+    .eq('id', messageId)
+    .eq('sender_id', myUserId);
+  if (error) {
+    if (error.code === '42501') {
+      throw new Error('The 1-hour edit window has closed — the server rejected this edit.');
+    }
+    throw new Error(`Edit failed: ${error.message}`);
+  }
+}
+
+/** Delete for everyone: hard DELETE of my own row (reactions/receipts cascade). */
+export async function deleteMessage(messageId: string, myUserId: string): Promise<void> {
+  const { error } = await supabase
+    .from('messages')
+    .delete()
+    .eq('id', messageId)
+    .eq('sender_id', myUserId);
+  if (error) {
+    throw new Error(`Delete failed: ${error.message}`);
+  }
 }
 
 export interface ThreadPreview {
@@ -231,6 +366,279 @@ export async function listLastMessages(
   return map;
 }
 
+// ---- Reactions (Phase 6) — sealed inside the encrypted payload ----
+
+export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
+
+export interface MessageReaction {
+  id: string;
+  messageId: string;
+  userId: string;
+  emoji: string;
+}
+
+interface ReactionRow {
+  id: string;
+  message_id: string;
+  user_id: string;
+  ciphertext: string;
+  nonce: string;
+}
+
+function sealReaction(emoji: string, pairKey: Uint8Array): { ciphertext: string; nonce: string } {
+  const env: Envelope = { v: ENVELOPE_VERSION, type: 'reaction', body: emoji };
+  const sealed = seal(utf8ToBytes(JSON.stringify(env)), pairKey);
+  return { ciphertext: toPostgrestBytea(sealed.ciphertext), nonce: toPostgrestBytea(sealed.nonce) };
+}
+
+/**
+ * Set MY reaction on a message. Upsert semantics server-side: one reaction
+ * per (message, user) — tapping the same emoji again toggles it OFF.
+ */
+export async function setReaction(
+  peerUserId: string,
+  myUserId: string,
+  keys: PairKeys,
+  messageId: string,
+  conversationId: string,
+  emoji: string,
+): Promise<void> {
+  const theirPk =
+    keys.theirIdentityPublicKey.length > 0
+      ? keys.theirIdentityPublicKey
+      : await fetchPeerIdentityKey(peerUserId);
+  const pairKey = derivePairKey(keys.myIdentitySecretKey, theirPk, keys.myIdentityPublicKey);
+
+  const existing = await supabase
+    .from('message_reactions')
+    .select('id, ciphertext, nonce')
+    .eq('message_id', messageId)
+    .eq('user_id', myUserId)
+    .maybeSingle();
+  if (existing.error && existing.error.code !== 'PGRST116') {
+    throw new Error(`Could not read existing reaction: ${existing.error.message}`);
+  }
+  const prior = (existing.data as { id: string; ciphertext: string; nonce: string } | null) ?? null;
+
+  if (prior) {
+    // Same emoji again → toggle off (delete); different → replace.
+    const plain = open(fromPostgrestBytea(prior.ciphertext), fromPostgrestBytea(prior.nonce), pairKey);
+    if (plain && decodePlain(plain).body === emoji) {
+      const del = await supabase.from('message_reactions').delete().eq('id', prior.id).eq('user_id', myUserId);
+      if (del.error) {
+        throw new Error(`Could not remove reaction: ${del.error.message}`);
+      }
+      return;
+    }
+    const sealed = sealReaction(emoji, pairKey);
+    const upd = await supabase
+      .from('message_reactions')
+      .update(sealed)
+      .eq('id', prior.id)
+      .eq('user_id', myUserId);
+    if (upd.error) {
+      throw new Error(`Could not change reaction: ${upd.error.message}`);
+    }
+    return;
+  }
+
+  const sealed = sealReaction(emoji, pairKey);
+  const ins = await supabase.from('message_reactions').insert({
+    message_id: messageId,
+    conversation_id: conversationId,
+    user_id: myUserId,
+    ...sealed,
+  });
+  if (ins.error) {
+    throw new Error(`Could not react: ${ins.error.message}`);
+  }
+}
+
+/** All reactions for one conversation, decrypted. Failures drop silently. */
+export async function listReactions(
+  peerUserId: string,
+  myUserId: string,
+  keys: PairKeys,
+  conversationId: string,
+): Promise<MessageReaction[]> {
+  const theirPk =
+    keys.theirIdentityPublicKey.length > 0
+      ? keys.theirIdentityPublicKey
+      : await fetchPeerIdentityKey(peerUserId);
+  const pairKey = derivePairKey(keys.myIdentitySecretKey, theirPk, keys.myIdentityPublicKey);
+
+  const { data, error } = await supabase
+    .from('message_reactions')
+    .select('id, message_id, user_id, ciphertext, nonce')
+    .eq('conversation_id', conversationId);
+  if (error) {
+    throw new Error(error.message);
+  }
+  const out: MessageReaction[] = [];
+  for (const row of (data ?? []) as ReactionRow[]) {
+    const plain = open(fromPostgrestBytea(row.ciphertext), fromPostgrestBytea(row.nonce), pairKey);
+    if (!plain) {
+      continue; // undecryptable reaction (e.g. forged/tampered) — skip
+    }
+    const decoded = decodePlain(plain);
+    if (!decoded.isReaction) {
+      continue;
+    }
+    out.push({ id: row.id, messageId: row.message_id, userId: row.user_id, emoji: decoded.body });
+  }
+  return out;
+}
+
+/** Realtime INSERT/DELETE on message_reactions for one conversation. */
+export function subscribeReactions(
+  conversationId: string,
+  onChange: () => void,
+): () => void {
+  const channel = supabase
+    .channel(`reactions_${conversationId}`)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'message_reactions' },
+      () => onChange(),
+    )
+    .subscribe();
+  return () => {
+    void supabase.removeChannel(channel);
+  };
+}
+
+// ---- Typing (Phase 6) ----
+
+export const TYPING_STALE_MS = 10_000;
+
+export interface TypingEventRow {
+  user_id: string;
+  typing: boolean;
+  updated_at: string;
+}
+
+/** Publish my typing state for a conversation (upsert, own row only). */
+export async function publishTyping(
+  conversationId: string,
+  myUserId: string,
+  typing: boolean,
+): Promise<void> {
+  const { error } = await supabase.from('typing_events').upsert(
+    { conversation_id: conversationId, user_id: myUserId, typing, updated_at: new Date().toISOString() },
+    { onConflict: 'conversation_id,user_id' },
+  );
+  if (error) {
+    // Typing is decorative — never break the chat over it.
+    return;
+  }
+}
+
+/** Realtime updates on typing_events for one conversation. */
+export function subscribeTyping(
+  conversationId: string,
+  onChange: () => void,
+): () => void {
+  const channel = supabase
+    .channel(`typing_${conversationId}`)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'typing_events' },
+      () => onChange(),
+    )
+    .subscribe();
+  return () => {
+    void supabase.removeChannel(channel);
+  };
+}
+
+/** Peer typing state, with stale-row expiry handled by the caller's clock. */
+export async function listTypingPeers(
+  conversationId: string,
+  myUserId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('typing_events')
+    .select('user_id, typing, updated_at')
+    .eq('conversation_id', conversationId)
+    .neq('user_id', myUserId);
+  if (error) {
+    return false;
+  }
+  const now = Date.now();
+  return ((data ?? []) as TypingEventRow[]).some(
+    (row) => row.typing && now - new Date(row.updated_at).getTime() < TYPING_STALE_MS,
+  );
+}
+
+// ---- Read receipts (Phase 6) ----
+
+export interface ReceiptRow {
+  message_id: string;
+  reader_id: string;
+}
+
+/** Insert receipts (reader = me) for the given message ids. Idempotent-ish: unique(message_id, reader_id) */
+export async function markMessagesRead(
+  conversationId: string,
+  myUserId: string,
+  messageIds: string[],
+): Promise<void> {
+  if (messageIds.length === 0) {
+    return;
+  }
+  const { error } = await supabase.from('read_receipts').insert(
+    messageIds.map((id) => ({
+      message_id: id,
+      conversation_id: conversationId,
+      reader_id: myUserId,
+    })),
+  );
+  // Unique-violation (already read) is fine; anything else is decorative too.
+  if (error && error.code !== '23505') {
+    return;
+  }
+}
+
+/** Message ids of MINE that the peer has read. */
+export async function listReadMessageIds(
+  conversationId: string,
+  myUserId: string,
+): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from('read_receipts')
+    .select('message_id, reader_id')
+    .eq('conversation_id', conversationId);
+  if (error) {
+    return new Set();
+  }
+  // A receipt counts when the READER is not me (i.e. the peer read my message).
+  const out = new Set<string>();
+  for (const row of (data ?? []) as ReceiptRow[]) {
+    if (row.reader_id !== myUserId) {
+      out.add(row.message_id);
+    }
+  }
+  return out;
+}
+
+/** Realtime INSERT on read_receipts for one conversation. */
+export function subscribeReceipts(
+  conversationId: string,
+  onChange: () => void,
+): () => void {
+  const channel = supabase
+    .channel(`receipts_${conversationId}`)
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'read_receipts' },
+      () => onChange(),
+    )
+    .subscribe();
+  return () => {
+    void supabase.removeChannel(channel);
+  };
+}
+
 /** Live updates for one conversation; returns unsubscribe. */
 export function subscribeMessages(
   peerUserId: string,
@@ -245,6 +653,28 @@ export function subscribeMessages(
       (payload) => {
         const row = payload.new as { conversation_id?: string } | null;
         if (row?.conversation_id === conversationId) {
+          onChange();
+        }
+      },
+    )
+    .on(
+      'postgres_changes',
+      { event: 'UPDATE', schema: 'public', table: 'messages' },
+      (payload) => {
+        const row = payload.new as { conversation_id?: string } | null;
+        if (row?.conversation_id === conversationId) {
+          onChange();
+        }
+      },
+    )
+    .on(
+      'postgres_changes',
+      { event: 'DELETE', schema: 'public', table: 'messages' },
+      (payload) => {
+        const row = (payload as { old?: { conversation_id?: string } | null }).old ?? null;
+        // DELETE payloads only carry the primary key — refetch is harmless
+        // even when the conversation id is absent from the payload.
+        if (!row || !row.conversation_id || row.conversation_id === conversationId) {
           onChange();
         }
       },

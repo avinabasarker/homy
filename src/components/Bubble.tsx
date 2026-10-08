@@ -1,5 +1,6 @@
 import React, { memo, useEffect } from 'react';
-import { Pressable, StyleSheet, Text } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -33,10 +34,14 @@ export interface BubbleProps {
   /** False for messages already in the thread at mount (no entrance animation). */
   animate: boolean;
   showTime: boolean;
+  /** Aggregated reaction chips for this message: emoji → count. */
+  reactions: Map<string, number>;
+  /** Phase 6 Part C: on MY messages — outline eye = sent, filled accent eye = read. */
+  readByPeer: boolean;
   onLongPress: (id: string) => void;
 }
 
-function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, onLongPress }: BubbleProps) {
+function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, reactions, readByPeer, onLongPress }: BubbleProps) {
   const t = useSharedValue(animate ? 0 : 1);
 
   useEffect(() => {
@@ -65,23 +70,45 @@ function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, onLongPress }:
       delayLongPress={250}
       style={({ pressed }) => [styles.row, mine ? styles.rowMine : null, pressed && styles.rowPressed]}
     >
-      <Animated.View
-        style={[
-          styles.bubble,
-          mine ? styles.bubbleMine : styles.bubbleTheirs,
-          lastOfGroup && (mine ? styles.tailMine : styles.tailTheirs),
-          entrance,
-        ]}
-      >
-        <Text style={styles.bubbleText}>
-          {item.undecryptable ? '🔒 Encrypted message' : item.body}
-        </Text>
-        {showTime ? (
-          <Text style={styles.bubbleTime}>
-            {new Date(item.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      <View style={[styles.bubbleColumn, mine ? styles.columnEnd : null]}>
+        <Animated.View
+          style={[
+            styles.bubble,
+            mine ? styles.bubbleMine : styles.bubbleTheirs,
+            lastOfGroup && (mine ? styles.tailMine : styles.tailTheirs),
+            entrance,
+          ]}
+        >
+          <Text style={styles.bubbleText}>
+            {item.undecryptable ? '🔒 Encrypted message' : item.body}
+            {item.editedAt && !item.undecryptable ? ' (edited)' : null}
           </Text>
+          {showTime ? (
+            <Text style={styles.bubbleTime}>
+              {new Date(item.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          ) : null}
+        </Animated.View>
+        {reactions.size > 0 ? (
+          <View style={[styles.chipRow, mine ? styles.columnEnd : null]}>
+            {[...reactions.entries()].map(([emoji, count]) => (
+              <View key={emoji} style={styles.chip}>
+                <Text style={styles.chipEmoji}>{emoji}</Text>
+                {count > 1 ? <Text style={styles.chipCount}>{count}</Text> : null}
+              </View>
+            ))}
+          </View>
         ) : null}
-      </Animated.View>
+        {mine && !item.undecryptable ? (
+          <View style={[styles.receiptRow, lastOfGroup ? null : styles.receiptHidden]}>
+            <Ionicons
+              name={readByPeer ? 'eye' : 'eye-outline'}
+              size={13}
+              color={readByPeer ? colors.accent : colors.textSecondary}
+            />
+          </View>
+        ) : null}
+      </View>
     </Pressable>
   );
 }
@@ -127,6 +154,43 @@ const styles = StyleSheet.create({
   },
   tailTheirs: {
     borderBottomLeftRadius: 4,
+  },
+  bubbleColumn: {
+    maxWidth: '80%',
+    gap: 2,
+  },
+  columnEnd: {
+    alignItems: 'flex-end',
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: colors.background,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  chipEmoji: {
+    fontSize: 12,
+  },
+  chipCount: {
+    fontSize: 10,
+    fontFamily: fontFamily.medium,
+    color: colors.textSecondary,
+  },
+  receiptRow: {
+    paddingHorizontal: 2,
+  },
+  receiptHidden: {
+    opacity: 0.6,
   },
   bubbleText: {
     fontSize: 15,
