@@ -13,6 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
+  ensureConversation,
   listMessages,
   loadMyIdentityKeys,
   sendMessage,
@@ -24,7 +25,6 @@ import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
 
 interface ChatScreenProps {
-  conversationId: string;
   peerUserId: string;
   peerUsername: string;
   onBack: () => void;
@@ -32,13 +32,14 @@ interface ChatScreenProps {
 
 /**
  * Phase 4 chat: E2EE bubbles over the verified messages table.
- * The conversation id currently maps to the ACCEPTED friend-request row
- * (server has no reachable conversation-creation path — see PROGRESS.md).
+ * The conversation id is resolved server-side via `ensure_conversation`
+ * (never derived client-side).
  */
-export function ChatScreen({ conversationId, peerUserId, peerUsername, onBack }: ChatScreenProps) {
+export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps) {
   const { userId } = useAuth();
   const insets = useSafeAreaInsets();
   const [keys, setKeys] = useState<PairKeys | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -63,7 +64,9 @@ export function ChatScreen({ conversationId, peerUserId, peerUsername, onBack }:
           return;
         }
         setKeys(full);
-        const thread = await listMessages(conversationId, peerUserId, userId, full);
+        const conversationId = await ensureConversation(peerUserId);
+        setConversationId(conversationId);
+        const thread = await listMessages(peerUserId, userId, full);
         if (cancelled) {
           return;
         }
@@ -81,14 +84,14 @@ export function ChatScreen({ conversationId, peerUserId, peerUsername, onBack }:
     return () => {
       cancelled = true;
     };
-  }, [userId, conversationId, peerUserId]);
+  }, [userId, peerUserId]);
 
   const reload = useCallback(async () => {
-    if (!userId || !keys) {
+    if (!userId || !keys || !conversationId) {
       return;
     }
     try {
-      const thread = await listMessages(conversationId, peerUserId, userId, keys);
+      const thread = await listMessages(peerUserId, userId, keys);
       setMessages(thread);
       setError(null);
     } catch (err) {
@@ -97,13 +100,17 @@ export function ChatScreen({ conversationId, peerUserId, peerUsername, onBack }:
   }, [userId, keys, conversationId, peerUserId]);
 
   useEffect(() => {
-    if (!keys) {
+    if (!keys || !conversationId) {
       return undefined;
     }
-    return subscribeMessages(conversationId, () => {
-      void reload();
-    });
-  }, [keys, conversationId, reload]);
+    return subscribeMessages(
+      peerUserId,
+      conversationId,
+      () => {
+        void reload();
+      },
+    );
+  }, [keys, conversationId, peerUserId, reload]);
 
   const handleSend = async () => {
     const text = draft.trim();
@@ -113,7 +120,7 @@ export function ChatScreen({ conversationId, peerUserId, peerUsername, onBack }:
     setSending(true);
     setError(null);
     try {
-      await sendMessage(conversationId, peerUserId, userId, keys, text);
+      await sendMessage(peerUserId, userId, keys, text);
       setDraft('');
       await reload();
     } catch (err) {

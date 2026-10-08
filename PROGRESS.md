@@ -59,11 +59,10 @@
    other as a contact. (accepted → contacts on both sides)
 10. As bob: pull-to-refresh. EXPECT list reloads without errors.
 11. Presence: with both apps in FOREGROUND, EXPECT the other contact's dot
-    to be the accent color and subtitle "Online".
-    KNOWN LIMITATION (see Blocked): presence rows of other users are not
-    readable via REST in the current DB policies, so the dot may show
-    offline even when the peer is online. If so, record it and move on —
-    fix arrives with a dashboard policy change (needs owner action).
+    to be the accent color and subtitle "Online". The deployed
+    presence_select policy now permits friends to read each other's rows;
+    a clean two-session re-verification is pending (the earlier REST probe
+    was invalidated by a session-clobbering bug in the probe itself).
 12. As bob: tap Reject flow — have a THIRD account `carol_test` send bob a
     request; bob taps Reject. EXPECT row disappears; carol's outgoing row
     disappears on her device within ~2 s.
@@ -73,11 +72,10 @@
     EXPECT blurred scrim over the list in the Recents snapshot.
 
 ### Blocked (Phase 3)
-- Presence visibility: `presence` SELECT returns only my own row for a
-  signed-in user (RLS), so contact online-dots cannot light up from REST.
-  Fix requires a Supabase dashboard policy change (allow authenticated
-  users to read presence of users they share an accepted request with) —
-  OWNER ACTION NEEDED; the app already renders whatever the server allows.
+- ~~Presence visibility: `presence` SELECT returns only my own row~~
+  **RESOLVED:** the deployed `presence_select` policy now reads
+  `are_friends(auth.uid(), user_id)`. Re-verify on device with two real
+  sessions (Phase 3 owner test 11).
 - Two attempts were made to discover a `contacts`-style edge table and a
   membership column on `conversations` (50+ candidate names probed via the
   PostgREST schema cache). Neither exists readably; contacts are accepted
@@ -110,49 +108,48 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - Tampered ciphertext rejected (secretbox auth) ✔
 - Third party (Carol) cannot decrypt Alice→Bob traffic ✔
 
-### Blocked (Phase 4) — SERVER SIDE, OWNER ACTION NEEDED
-- `messages` INSERT is RLS-rejected (42501) unless a matching
-  `conversations` row exists. No conversation row is created by request
-  acceptance (verified: select returns [] for both parties after accept).
-- No reachable RPC can create one (10 common names probed — all missing).
-- The `conversations` table's membership column could not be identified
-  (60+ candidate names rejected by the PostgREST schema cache; empty
-  inserts hit RLS before column validation).
-- CONSEQUENCE: in-app sends will show the honest error "The server rejected
-  the message because the conversation row does not exist yet…" until the
-  owner adds, in Supabase (SQL editor), EITHER a trigger on
-  friend_requests UPDATE pending→accepted that inserts the conversation
-  row (with whatever membership columns the schema has) OR an RPC the app
-  can call. The app needs no change once that exists — messages.ts already
-  writes conversation_id and will start working.
-- Interim mapping: ChatScreen conversation id = the accepted request row's
-  OTHER PARTY user id — update after owner adds the trigger if the server
-  expects a different id.
+### Blocked (Phase 4) — RESOLVED 2026-10-08
+- ~~`messages` INSERT is RLS-rejected (42501) unless a matching
+  `conversations` row exists~~ **FIXED:** the owner added the server RPC
+  `ensure_conversation(peer uuid) -> uuid` (documented in
+  supabase/schema.sql, which is now the committed source of truth). The
+  app calls it via `ensureConversation(peerId)` in messages.ts — send
+  path, thread-list path, and realtime subscription all resolve the id
+  through it. Self-chat resolves it with the user's own id.
+- Presence: the deployed `presence_select` policy allows friends to read
+  each other's presence. An earlier two-session probe reported unreadable
+  presence rows, but that probe was invalidated by a session-clobbering
+  bug in the probe itself (shared AsyncStorage session). A clean
+  re-verification with two independent sessions needs to be run on
+  device; no server change believed necessary.
 
-### Phase 4 owner tests (after Phase 3 owner tests 1–14 pass)
-1. As alice: tap the contact row `bob_test`.
+### Phase 4 owner tests — ONE phone, account switching (after Phase 3 tests 1–14 pass)
+1. Logged in as alice: tap the contact row `bob_test`.
    EXPECT chat screen opens: header `bob_test` + "End-to-end encrypted",
    empty thread shows "No messages yet. Say Hi!".
 2. Type "Say Hi!" → Send.
-   EXPECT (current blocked state) the red honest error about the missing
-   conversation row — this is CORRECT behavior until the owner adds the
-   server trigger/RPC described in Blocked above. After the owner adds it:
-   EXPECT the bubble appears on the right in accent purple with a timestamp.
-3. As bob (device 2): open chat with alice.
-   EXPECT alice's message arrives within ~2 s WITHOUT refresh (realtime),
-   rendered as a grey bubble on the left.
-4. As bob: reply "Hi alice!" → EXPECT bob's bubble on the right.
-5. As alice: bob's reply appears within ~2 s without refresh.
-6. Force-close alice's app → reopen → PIN → open chat with bob.
-   EXPECT full history reloads from the server and DECRYPTS (keys persisted
-   in SecureStore; session key derived deterministically from identity keys).
-7. On bob's device: logout → login (new prekey uploaded, identity keys kept).
-   EXPECT alice's history still decrypts (pair key depends only on identity
-   keys, which do not rotate).
+   EXPECT the bubble appears immediately on the RIGHT in accent purple with
+   a timestamp (sends now work via the ensure_conversation RPC; the old
+   "conversation row does not exist" error should be gone).
+3. Tap ‹ back → re-open the SAME contact.
+   EXPECT "Say Hi!" is still there (fetched + decrypted from the server).
+4. Logout → login as bob → open the chat with alice.
+   EXPECT "Say Hi!" renders as a GREY bubble on the LEFT (bob decrypts
+   alice's message with the same pair key).
+5. As bob: reply "Hi alice!" → EXPECT bob's bubble on the RIGHT.
+6. Self-chat: as bob, tap "Saved messages (you)".
+   EXPECT the same chat UI; send "my note to self" → EXPECT it appears on
+   the RIGHT. Back → re-open → EXPECT it persisted + decrypted (server
+   created the a-b self-conversation row via the RPC).
+7. Restart-and-decrypt: force-close the app → reopen → PIN → open the
+   alice chat (as bob) and Saved messages.
+   EXPECT full history reloads from the server and DECRYPTS (identity keys
+   persisted in SecureStore; pair key derived deterministically from
+   identity keys, which do not rotate on login).
 8. Tamper check (advanced, optional): in Supabase → Table editor → messages,
-   hand-edit one ciphertext byte of bob's message. Reload alice's chat.
-   EXPECT that one message renders as "🔒 Encrypted message" and the rest
-   render normally (secretbox auth failure is contained per-message).
+   hand-edit one ciphertext byte. Reload the chat. EXPECT that ONE message
+   renders as "🔒 Encrypted message" and the rest render normally
+   (secretbox auth failure is contained per-message).
 
 ---
 
@@ -202,12 +199,13 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - [x] Phase 1 — Foundation & UI Shell
 - [x] Phase 2 — Supabase & Auth
 - [x] Phase 3 — Social Graph
-- [x] Phase 4 — E2EE Messaging Core (this section; blocked on server conversation creation)
+- [x] Phase 4 — E2EE Messaging Core (conversation creation FIXED — server RPC)
 - [ ] Phase 5 — Chat UX (Pixel-Perfect)
 - [ ] Phase 6 — Interactions
 - [ ] Phase 7 — Media & Voice
 - [ ] Phase 8 — Multi-Device, Ship & Infra
 
-**Next step:** owner runs Phase 3 + Phase 4 owner tests; adds the missing
-conversation-creation trigger/RPC in Supabase (see Blocked). Phase 5
-(Chat UX polish) proceeds after that per the master prompt.
+**Next step:** owner runs Phase 3 + Phase 4 owner tests (the Phase 4
+messaging list below is rewritten for a single device with account
+switching). Phase 5 (Chat UX polish) proceeds after that per the master
+prompt.

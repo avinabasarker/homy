@@ -19,7 +19,6 @@ import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
 
 interface OpenChat {
-  conversationId: string;
   peerUserId: string;
   peerUsername: string;
 }
@@ -91,7 +90,6 @@ export function ChatsScreen() {
   if (openChat && userId) {
     return (
       <ChatScreen
-        conversationId={openChat.conversationId}
         peerUserId={openChat.peerUserId}
         peerUsername={openChat.peerUsername}
         onBack={() => setOpenChat(null)}
@@ -179,7 +177,8 @@ export function ChatsScreen() {
                   onPress={() =>
                     userId &&
                     setOpenChat({
-                      conversationId: `self_${userId}`,
+                      // Self-chat: ChatScreen resolves the id via
+                      // ensureConversation(myOwnId) on the server.
                       peerUserId: userId,
                       peerUsername: 'Saved messages',
                     })
@@ -253,10 +252,6 @@ export function ChatsScreen() {
                   onPress={() =>
                     userId &&
                     setOpenChat({
-                      // SERVER LIMITATION: no reachable conversation-creation
-                      // path; the accepted request row id is our conversation
-                      // key until the owner adds the trigger/RPC.
-                      conversationId: c.addedAt && c.userId ? c.userId : c.userId,
                       peerUserId: c.userId,
                       peerUsername: c.username,
                     })

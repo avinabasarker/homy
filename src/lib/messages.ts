@@ -4,16 +4,38 @@
 // nacl.secretbox → insert into messages (ciphertext/nonce as \x hex bytea).
 // Receive: list rows for the conversation → decrypt with the same pair key.
 //
-// SERVER LIMITATION (verified live, 2 attempts, see PROGRESS.md "Blocked"):
-// messages RLS requires a conversation row to exist, and neither the app nor
-// any discoverable RPC can create one. Until the owner adds the missing
-// trigger/RPC on the server, sends fail with a clear, honest error.
+// Conversation ids come from the server RPC `ensure_conversation(peer)`
+// (schema: supabase/schema.sql) — never derived client-side.
 import '../../polyfills';
 
 import { bytesToUtf8, fromHex, fromPostgrestBytea, toPostgrestBytea, utf8ToBytes } from './bytea';
 import { derivePairKey, open, seal } from './crypto';
 import { secureGet, secureKeys } from './secureStore';
 import { supabase } from './supabase';
+
+/**
+ * Resolve (or create) the conversation row between me and `peer` via the
+ * server RPC. In-memory cache per peer so repeated opens don't re-RPC;
+ * cache lives only for the process lifetime.
+ */
+const conversationCache = new Map<string, string>();
+
+export async function ensureConversation(peerId: string): Promise<string> {
+  const cached = conversationCache.get(peerId);
+  if (cached) {
+    return cached;
+  }
+  const { data, error } = await supabase.rpc('ensure_conversation', { peer: peerId });
+  if (error || typeof data !== 'string') {
+    throw new Error(
+      error && error.message
+        ? `Could not open the conversation: ${error.message}`
+        : 'Could not open the conversation.',
+    );
+  }
+  conversationCache.set(peerId, data);
+  return data;
+}
 
 export interface ChatMessage {
   id: string;
@@ -92,7 +114,6 @@ export async function fetchPeerIdentityKey(peerUserId: string): Promise<Uint8Arr
  * mapped reason when the server rejects the write.
  */
 export async function sendMessage(
-  conversationId: string,
   peerUserId: string,
   myUserId: string,
   keys: PairKeys,
@@ -109,6 +130,7 @@ export async function sendMessage(
   );
   const { ciphertext, nonce } = seal(utf8ToBytes(text), pairKey);
 
+  const conversationId = await ensureConversation(peerUserId);
   const { error } = await supabase.from('messages').insert({
     conversation_id: conversationId,
     sender_id: myUserId,
@@ -117,11 +139,7 @@ export async function sendMessage(
   });
   if (error) {
     if (error.code === '42501') {
-      throw new SendMessageError(
-        'The server rejected the message because the conversation row does not exist yet ' +
-          '(owner must add the conversation-creation trigger/RPC in Supabase).',
-        'no-conversation',
-      );
+      conversationCache.delete(peerUserId);
     }
     throw new SendMessageError(error.message, 'insert');
   }
@@ -129,7 +147,6 @@ export async function sendMessage(
 
 /** Load + decrypt the thread for a conversation, oldest first. */
 export async function listMessages(
-  conversationId: string,
   peerUserId: string,
   myUserId: string,
   keys: PairKeys,
@@ -144,6 +161,7 @@ export async function listMessages(
     keys.myIdentityPublicKey,
   );
 
+  const conversationId = await ensureConversation(peerUserId);
   const { data, error } = await supabase
     .from('messages')
     .select('id, conversation_id, sender_id, ciphertext, nonce, sent_at')
@@ -170,7 +188,11 @@ export async function listMessages(
 }
 
 /** Live updates for one conversation; returns unsubscribe. */
-export function subscribeMessages(conversationId: string, onChange: () => void): () => void {
+export function subscribeMessages(
+  peerUserId: string,
+  conversationId: string,
+  onChange: () => void,
+): () => void {
   const channel = supabase
     .channel(`messages_${conversationId}`)
     .on(
