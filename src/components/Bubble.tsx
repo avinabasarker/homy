@@ -1,4 +1,4 @@
-import React, { memo } from 'react';
+import React, { memo, useEffect } from 'react';
 import { Pressable, StyleSheet, Text } from 'react-native';
 import Animated, {
   useAnimatedStyle,
@@ -39,9 +39,14 @@ export interface BubbleProps {
 function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, onLongPress }: BubbleProps) {
   const t = useSharedValue(animate ? 0 : 1);
 
-  if (animate && t.value === 0) {
-    t.value = withDelay(60, withSpring(1, SPRING_CONFIG));
-  }
+  useEffect(() => {
+    if (animate) {
+      t.value = withDelay(60, withSpring(1, SPRING_CONFIG));
+    }
+    // Run once per mount — the pop should play exactly once. `animate` and
+    // `t` are stable for a given mounted bubble (memoized by id below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const entrance = useAnimatedStyle(() => ({
     opacity: t.value,
