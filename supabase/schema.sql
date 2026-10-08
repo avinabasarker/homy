@@ -296,3 +296,37 @@ alter publication supabase_realtime add table public.read_receipts;
 
 grant usage on schema public to anon, authenticated, service_role;
 grant all on all tables in schema public to authenticated, service_role;
+
+-- ================================================================
+-- PHASE 6 ADDITIONS — run once (already deployed to the DB)
+-- 1) Encrypted reactions: one reaction per user per message (replace on re-tap)
+create table public.message_reactions (
+  id              uuid primary key default gen_random_uuid(),
+  message_id      uuid not null references public.messages (id) on delete cascade,
+  conversation_id uuid not null references public.conversations (id) on delete cascade,
+  user_id         uuid not null references auth.users (id) on delete cascade,
+  ciphertext      bytea not null,
+  nonce           bytea not null,
+  created_at      timestamptz not null default now(),
+  unique (message_id, user_id)
+);
+
+alter table public.message_reactions enable row level security;
+
+create policy "reactions_select" on public.message_reactions
+  for select to authenticated using (is_participant(conversation_id, auth.uid()));
+create policy "reactions_insert_own" on public.message_reactions
+  for insert to authenticated
+  with check (user_id = auth.uid() and is_participant(conversation_id, auth.uid()));
+create policy "reactions_delete_own" on public.message_reactions
+  for delete to authenticated using (user_id = auth.uid());
+
+grant all on public.message_reactions to authenticated, service_role;
+alter publication supabase_realtime add table public.message_reactions;
+
+-- 2) Enforce the 1-hour edit window SERVER-side (client checks are bypassable)
+drop policy "messages_update_own" on public.messages;
+create policy "messages_update_own" on public.messages
+  for update to authenticated
+  using (sender_id = auth.uid() and sent_at > now() - interval '1 hour')
+  with check (sender_id = auth.uid());
