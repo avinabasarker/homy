@@ -1,8 +1,119 @@
 # Homy — PROGRESS.md
 
 **Project:** Homy (Private E2EE Android Messenger) — v2.1 full rebuild
-**Current phase:** Phase 5 — Chat UX Pixel-Perfect (code complete; awaiting device verification)
-**Typecheck:** `npx tsc --noEmit` ✅ zero errors (last run: end of Phase 5 build)
+**Current phase:** Phase 6 — Interactions (code complete; awaiting device verification)
+**Typecheck:** `npx tsc --noEmit` ✅ zero errors (last run: end of Phase 6 build)
+
+---
+
+## Phase 6 — Interactions
+
+### Schema additions (owner deployed; committed to supabase/schema.sql verbatim)
+- `message_reactions(id, message_id, conversation_id, user_id, ciphertext,
+  nonce, created_at, unique(message_id, user_id))` — RLS via
+  `is_participant`, own-insert/own-delete, in the realtime publication.
+- `messages_update_own` tightened: `sent_at > now() - interval '1 hour'` —
+  the edit window is now SERVER-enforced.
+
+### What was built (no changes to crypto primitives or the social layer)
+1. **Envelope v1** (messages.ts): plaintext is now JSON
+   `{v:1, type, body, disappearHours?}`. `decodePlain` handles BOTH v1
+   envelopes and legacy plain-string rows — old history keeps rendering.
+   Reactions + disappearing flags travel INSIDE sealed payloads only.
+2. **Reactions**: long-press bubble → bar with 👍 ❤️ 😂 😮 😢 🙏. Tap seals
+   a `{v:1,type:"reaction",emoji}` envelope with the conversation key and
+   upserts into `message_reactions` (one per user per message; same emoji
+   again toggles OFF). Chips render under bubbles (emoji + count);
+   peer reactions decrypt with the same key; realtime INSERT/DELETE
+   refreshes. Tampered/undecryptable reactions are skipped silently.
+3. **Edit (1 hour)**: long-press own message → Edit → composer in edit
+   mode (banner + Cancel) → Save = UPDATE ciphertext (new envelope) +
+   `edited_at`. Server rejects >1h — surfaced as an honest error; the
+   Edit button is hidden for own messages older than 1h. Subtle
+   "(edited)" suffix on the bubble.
+4. **Delete for everyone**: long-press own message → Delete → hard DELETE
+   server-side (no tombstone); realtime DELETE removes it on the peer's
+   device; reactions/receipts cascade via FK.
+5. **Disappearing messages**: header hourglass dropdown — Off / 24 h /
+   7 days, PLUS "60 seconds (test)" behind `__DEV__` only (never in
+   release builds). Hours ride inside the envelope; receiver computes
+   expiresAt = sentAt + hours, hides expired messages, and purges on
+   mount + every 60 s. Documented PRD caveat: the SERVER copy persists
+   unless the sender deletes the row — client-side expiry is a hide.
+6. **Typing**: publish typing=true debounced 2 s after text changes,
+   typing=false after 3 s idle or on send. Peer's typing renders three
+   bouncing dots above the composer; rows with updated_at older than
+   10 s are treated as stale; own row is always excluded.
+7. **Read receipts**: while a chat is open, receipts (reader = me) are
+   inserted for the peer's rendered messages. Sender side: eye icon on
+   own messages per Part C — outline = sent, filled/accent = read.
+   Realtime INSERT refreshes.
+
+### Phase 6 owner tests — ONE phone, account switching
+1. **Legacy history survives**: open any pre-Phase-6 chat. EXPECT all old
+   messages render as text (NOT 🔒). Send a new one — renders normally.
+2. **Reactions (self)**: long-press a bubble → EXPECT the 6-emoji bar.
+   Tap ❤️ → EXPECT a ❤️ chip under the bubble. Long-press → tap ❤️ again
+   → EXPECT the chip gone (toggle). Long-press → tap 👍 → EXPECT chip
+   switches to 👍 (replace, not duplicate).
+3. **Edit**: long-press your OWN recent message → Edit → change text →
+   Save. EXPECT the bubble shows the new text + " (edited)".
+4. **Edit window**: (after 1 h, or skip if impractical) Edit on an older
+   own message is NOT offered; if attempted via a stale UI, an honest
+   1-hour-window error appears.
+5. **Delete for everyone**: long-press own message → Delete. EXPECT the
+   bubble vanishes locally AND for the peer (simulate: log in as the
+   other account and open the chat — the message is gone).
+6. **Disappearing**: hourglass → 60 seconds (test) → send "vanish".
+   EXPECT the bubble gone from BOTH views within ~60 s (watch it purge on
+   the 60 s timer). Switch back to Off afterwards.
+7. **Typing (SQL sim)**: with the chat open as alice, run the typing SQL
+   below. EXPECT three bouncing dots above the composer within ~1 s, and
+   they disappear ≤10 s later or when the row flips to false.
+8. **Receipts (SQL sim)**: alice sends a message with her chat closed on
+   bob's side; run the receipt SQL below as "bob read it". Open as alice
+   → EXPECT the eye icon on that message turns filled/accent.
+
+### SQL snippets (Supabase SQL editor — ids resolved by USERNAME, no uuids)
+
+```sql
+-- Simulate bob TYPING in alice↔bob conversation (Phase 6 test 7):
+insert into typing_events (conversation_id, user_id, typing, updated_at)
+select c.id, bob.id, true, now()
+from conversations c
+join profiles pa on pa.id = c.user_a join profiles pb on pb.id = c.user_b
+join profiles bob on bob.username = 'bob_test'
+where 'alice_test' in (pa.username, pb.username)
+  and 'bob_test' in (pa.username, pb.username)
+  and bob.id in (c.user_a, c.user_b)
+on conflict (conversation_id, user_id) do update
+  set typing = true, updated_at = now();
+
+-- Stop the typing indicator:
+update typing_events te set typing = false, updated_at = now()
+from profiles bob
+where bob.username = 'bob_test' and te.user_id = bob.id;
+
+-- Simulate bob READING alice's latest message (Phase 6 test 8):
+insert into read_receipts (message_id, conversation_id, reader_id)
+select m.id, m.conversation_id, bob.id
+from messages m
+join conversations c on c.id = m.conversation_id
+join profiles pa on pa.id = c.user_a join profiles pb on pb.id = c.user_b
+join profiles alice on alice.username = 'alice_test'
+join profiles bob on bob.username = 'bob_test'
+where 'alice_test' in (pa.username, pb.username)
+  and 'bob_test' in (pa.username, pb.username)
+  and m.sender_id = alice.id
+order by m.sent_at desc
+limit 1
+on conflict (message_id, reader_id) do nothing;
+```
+
+### Known limitation (documented PRD behavior)
+- Disappearing messages are a CLIENT-side hide: the server copy persists
+  until the sender deletes it. Enforcing expiry server-side needs a
+  pg_cron sweep — deferred to Phase 7/8.
 
 ---
 
@@ -303,11 +414,10 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - [x] Phase 2 — Supabase & Auth
 - [x] Phase 3 — Social Graph
 - [x] Phase 4 — E2EE Messaging Core (conversation creation FIXED — server RPC)
-- [x] Phase 5 — Chat UX (Pixel-Perfect) (this section)
-- [ ] Phase 6 — Interactions
+- [x] Phase 5 — Chat UX (Pixel-Perfect)
+- [x] Phase 6 — Interactions
 - [ ] Phase 7 — Media & Voice
 - [ ] Phase 8 — Multi-Device, Ship & Infra
 
-**Next step:** owner runs Phase 3 + Phase 4 owner tests, then the Phase 5
-single-device list above (with the fake-message SQL INSERT for testing
-animations/haptics without a second phone).
+**Next step:** owner runs the Phase 3–6 owner tests (Phase 6 list is
+single-device, with typing/receipt SQL simulations).
