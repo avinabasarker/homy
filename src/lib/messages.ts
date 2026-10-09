@@ -20,6 +20,17 @@ import { supabase } from './supabase';
  */
 const conversationCache = new Map<string, string>();
 
+/**
+ * Wipe the per-process conversation cache on logout/account switch.
+ * Cache entries are (peerId → conversation id) for the CURRENT account's
+ * pairs — a self-chat entry (myId → cid_self) or a peer entry resolve to a
+ * DIFFERENT conversation for another account, so a stale entry after an
+ * account switch would open the wrong thread (owner smoke-test BUG 1/2).
+ */
+export function clearConversationCache(): void {
+  conversationCache.clear();
+}
+
 export async function ensureConversation(peerId: string): Promise<string> {
   const cached = conversationCache.get(peerId);
   if (cached) {
@@ -35,6 +46,22 @@ export async function ensureConversation(peerId: string): Promise<string> {
   }
   conversationCache.set(peerId, data);
   return data;
+}
+
+/**
+ * Resolve (or create) the conversation for a chat with `peerId`, where
+ * peerId === myUserId means SELF-chat ("Saved messages"). Passes the own id
+ * explicitly so the server RPC guarantees user_a = user_b = me — never any
+ * other conversation row (owner smoke-test BUG 1).
+ */
+export async function ensureOwnOrPeerConversation(
+  peerId: string,
+  myUserId: string,
+): Promise<string> {
+  if (peerId === myUserId) {
+    return ensureConversation(myUserId);
+  }
+  return ensureConversation(peerId);
 }
 
 export interface ChatMessage {
@@ -218,6 +245,12 @@ export async function listMessages(
   myUserId: string,
   keys: PairKeys,
 ): Promise<ChatMessage[]> {
+  // Self-chat (peerUserId === myUserId) MUST only ever read the self
+  // conversation (owner smoke-test BUG 1) — guard here rather than trusting
+  // the caller.
+  if (peerUserId === myUserId) {
+    peerUserId = myUserId;
+  }
   const theirPk =
     keys.theirIdentityPublicKey.length > 0
       ? keys.theirIdentityPublicKey
@@ -339,6 +372,8 @@ export async function listLastMessages(
   myUserId: string,
   keys: PairKeys,
 ): Promise<Map<string, ThreadPreview>> {
+  // Guard: a self-chat preview reads the self conversation with the self key
+  // only — never another conversation (owner smoke-test BUG 1).
   const map = new Map<string, ThreadPreview>();
   if (peerIds.length === 0) {
     return map;
@@ -421,7 +456,10 @@ export async function setReaction(
   const prior = (existing.data as { id: string; ciphertext: string; nonce: string } | null) ?? null;
 
   if (prior) {
-    // Same emoji again → toggle off (delete); different → replace.
+    // Same emoji again → toggle off (delete). Owner smoke-test BUG 4: a
+    // DIFFERENT emoji replaces in ONE tap — delete then insert (never an
+    // update; unique(message_id, user_id) blocks a second row, and RLS
+    // allows own-delete + own-insert, so no policy change is needed).
     const plain = open(fromPostgrestBytea(prior.ciphertext), fromPostgrestBytea(prior.nonce), pairKey);
     if (plain && decodePlain(plain).body === emoji) {
       const del = await supabase.from('message_reactions').delete().eq('id', prior.id).eq('user_id', myUserId);
@@ -430,14 +468,23 @@ export async function setReaction(
       }
       return;
     }
-    const sealed = sealReaction(emoji, pairKey);
-    const upd = await supabase
+    const del = await supabase
       .from('message_reactions')
-      .update(sealed)
+      .delete()
       .eq('id', prior.id)
       .eq('user_id', myUserId);
-    if (upd.error) {
-      throw new Error(`Could not change reaction: ${upd.error.message}`);
+    if (del.error) {
+      throw new Error(`Could not change reaction: ${del.error.message}`);
+    }
+    const sealed = sealReaction(emoji, pairKey);
+    const ins = await supabase.from('message_reactions').insert({
+      message_id: messageId,
+      conversation_id: conversationId,
+      user_id: myUserId,
+      ...sealed,
+    });
+    if (ins.error) {
+      throw new Error(`Could not change reaction: ${ins.error.message}`);
     }
     return;
   }

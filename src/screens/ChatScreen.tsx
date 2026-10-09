@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -28,7 +29,7 @@ import { EmptyState } from '../components/EmptyState';
 import {
   deleteMessage,
   editMessage,
-  ensureConversation,
+  ensureOwnOrPeerConversation,
   isEditable,
   listMessages,
   listReadMessageIds,
@@ -47,6 +48,7 @@ import {
 } from '../lib/messages';
 import type { ChatMessage, PairKeys } from '../lib/messages';
 import { fetchPeerIdentityKey } from '../lib/messages';
+import { hideMessageLocally, listHiddenMessageIds } from '../lib/hiddenMessages';
 import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
 
@@ -79,6 +81,9 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
   const [editingId, setEditingId] = useState<string | null>(null);
   const [disappearHours, setDisappearHours] = useState<number | null>(null);
   const [showDisappearMenu, setShowDisappearMenu] = useState(false);
+  // Owner smoke-test BUG 5: ids hidden via "Delete for me" — filtered out of
+  // every thread query, LOCAL-ONLY (the row stays on the server for the peer).
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
   const typingIdleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const listRef = useRef<FlatList<ChatMessage> | null>(null);
   // Ids present at mount; only messages arriving afterwards animate in.
@@ -102,15 +107,26 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           return;
         }
         setKeys(full);
-        const conversationId = await ensureConversation(peerUserId);
+        // Self-chat (peerUserId === userId) always resolves via the own-id
+        // RPC path so it can never bind to another conversation row (BUG 1).
+        const conversationId = await ensureOwnOrPeerConversation(peerUserId, userId);
         setConversationId(conversationId);
-        const thread = await listMessages(peerUserId, userId, full);
+        // BUG 2 gate: history loads HERE, on open — sending is never a
+        // prerequisite. Hidden ids (BUG 5) are filtered out of the first
+        // render too.
+        const [thread, hidden] = await Promise.all([
+          listMessages(peerUserId, userId, full),
+          listHiddenMessageIds().catch(() => new Set<string>()),
+        ]);
         if (cancelled) {
           return;
         }
-        initialIdsRef.current = new Set(thread.map((m) => m.id));
+        setHiddenIds(hidden);
+        initialIdsRef.current = new Set(
+          thread.filter((m) => !hidden.has(m.id)).map((m) => m.id),
+        );
         prevCountRef.current = thread.length;
-        setMessages(thread);
+        setMessages(thread.filter((m) => !hidden.has(m.id)));
       } catch (err) {
         if (!cancelled) {
           setError((err as Error).message);
@@ -131,11 +147,12 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
       return;
     }
     try {
-      const [thread, reactionList, readSet, typing] = await Promise.all([
+      const [thread, reactionList, readSet, typing, hidden] = await Promise.all([
         listMessages(peerUserId, userId, keys),
         listReactions(peerUserId, userId, keys, conversationId).catch(() => []),
         listReadMessageIds(conversationId, userId).catch(() => new Set<string>()),
         listTypingPeers(conversationId, userId).catch(() => false),
+        listHiddenMessageIds().catch(() => new Set<string>()),
       ]);
       // NEW incoming message while the screen is open → light haptic.
       if (
@@ -146,6 +163,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       }
       prevCountRef.current = thread.length;
+      setHiddenIds(hidden);
       const byMessage = new Map<string, Map<string, string>>();
       for (const r of reactionList) {
         let m = byMessage.get(r.messageId);
@@ -158,7 +176,9 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
       setReactions(byMessage);
       setReadIds(readSet);
       setPeerTyping(typing);
-      setMessages(thread);
+      // Owner smoke-test BUG 5: locally hidden rows never render. The server
+      // row stays untouched — the peer still sees the message.
+      setMessages(thread.filter((m) => !hidden.has(m.id)));
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -255,17 +275,46 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!userId) {
-      return;
-    }
+  /** Owner smoke-test BUG 5: Delete asks first. "Delete for everyone" is a
+   *  server DELETE (row gone for both, no tombstone); "Delete for me" is a
+   *  LOCAL-only hide (server row untouched — the peer still sees it). */
+  const confirmDelete = (id: string) => {
     setActionId(null);
-    try {
-      await deleteMessage(id, userId);
-      await reload();
-    } catch (err) {
-      setError((err as Error).message);
-    }
+    Alert.alert(
+      'Delete message',
+      'Delete for everyone removes it from the conversation. Delete for me removes it only from this device.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete for everyone',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await deleteMessage(id, userId ?? '');
+                await reload();
+              } catch (err) {
+                setError((err as Error).message);
+              }
+            })();
+          },
+        },
+        {
+          text: 'Delete for me',
+          onPress: () => {
+            void (async () => {
+              try {
+                await hideMessageLocally(id);
+                setHiddenIds((prev) => new Set(prev).add(id));
+                setMessages((prev) => prev.filter((m) => m.id !== id));
+              } catch (err) {
+                setError((err as Error).message);
+              }
+            })();
+          },
+        },
+      ],
+    );
   };
 
   const handleReact = async (messageId: string, emoji: string) => {
@@ -325,6 +374,13 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
     return () => clearInterval(timer);
   }, []);
 
+  // Owner smoke-test BUG 3: exactly ONE eye per thread, attached under MY
+  // most recent message (right-aligned). No messages of mine → no eye.
+  const lastMineId = useMemo(
+    () => messages.findLast((m) => m.senderId === userId)?.id ?? null,
+    [messages, userId],
+  );
+
   const renderBubble = ({ index }: { index: number }) => {
     const item = messages[index];
     if (!item) {
@@ -349,6 +405,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           animate={animate}
           showTime={revealedIdRef.current === item.id}
           reactions={rx}
+          showReceipt={item.id === lastMineId}
           readByPeer={readIds.has(item.id)}
           onLongPress={handleLongPress}
         />
@@ -379,8 +436,8 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
             ) : null}
             {mine && !item.undecryptable ? (
               <Pressable
-                accessibilityLabel="Delete message for everyone"
-                onPress={() => void handleDelete(item.id)}
+                accessibilityLabel="Delete message"
+                onPress={() => confirmDelete(item.id)}
                 style={styles.actionTextBtn}
               >
                 <Text style={styles.actionTextDanger}>Delete</Text>

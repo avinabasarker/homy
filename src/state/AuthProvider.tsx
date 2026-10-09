@@ -12,6 +12,7 @@ import React, {
 import { AppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 
+import { clearConversationCache } from '../lib/messages';
 import {
   clearRecoveryPending,
   getUsername,
@@ -115,6 +116,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(async (input: { username: string; password: string }) => {
     const result = await loginAccount(input);
+    // The session flipped to a different account: conversation ids cached by
+    // the PREVIOUS account may collide with this one's self-chat (BUG 1/2).
+    clearConversationCache();
     setUserId(result.userId);
     setUsername(result.username);
     startPresenceHeartbeat(result.userId);
@@ -161,6 +165,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (userId) {
       await signOutAccount(userId);
     }
+    // Stale conversation ids belong to THIS account's pairs — wipe before
+    // another account reuses this process (owner smoke-test BUG 1/2).
+    clearConversationCache();
     setUserId(null);
     setUsername(null);
     setStatus('signedOut');

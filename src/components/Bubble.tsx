@@ -36,12 +36,26 @@ export interface BubbleProps {
   showTime: boolean;
   /** Aggregated reaction chips for this message: emoji → count. */
   reactions: Map<string, number>;
-  /** Phase 6 Part C: on MY messages — outline eye = sent, filled accent eye = read. */
+  /** Owner smoke-test BUG 3: eye renders on EXACTLY ONE bubble per thread
+   *  — MY most recent message. False on every other bubble, and on peer
+   *  bubbles (so a thread with none of my messages shows no eye at all). */
+  showReceipt: boolean;
+  /** Phase 6 Part C: outline eye = sent, filled accent eye = read. */
   readByPeer: boolean;
   onLongPress: (id: string) => void;
 }
 
-function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, reactions, readByPeer, onLongPress }: BubbleProps) {
+function BubbleImpl({
+  item,
+  mine,
+  lastOfGroup,
+  animate,
+  showTime,
+  reactions,
+  showReceipt,
+  readByPeer,
+  onLongPress,
+}: BubbleProps) {
   const t = useSharedValue(animate ? 0 : 1);
 
   useEffect(() => {
@@ -79,7 +93,7 @@ function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, reactions, rea
             entrance,
           ]}
         >
-          <Text style={styles.bubbleText}>
+          <Text style={[styles.bubbleText, styles.bubbleTextWrap]}>
             {item.undecryptable ? '🔒 Encrypted message' : item.body}
             {item.editedAt && !item.undecryptable ? ' (edited)' : null}
           </Text>
@@ -99,8 +113,8 @@ function BubbleImpl({ item, mine, lastOfGroup, animate, showTime, reactions, rea
             ))}
           </View>
         ) : null}
-        {mine && !item.undecryptable ? (
-          <View style={[styles.receiptRow, lastOfGroup ? null : styles.receiptHidden]}>
+        {mine && !item.undecryptable && showReceipt ? (
+          <View style={styles.receiptRow}>
             <Ionicons
               name={readByPeer ? 'eye' : 'eye-outline'}
               size={13}
@@ -134,10 +148,16 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
   bubble: {
+    // Owner smoke-test BUG 7: long words must wrap at word boundaries —
+    // shrinkable container + cap at ~80% of screen width, no fixed widths.
     maxWidth: '80%',
+    flexShrink: 1,
     borderRadius: 16,
     paddingHorizontal: 12,
     paddingVertical: 8,
+  },
+  bubbleTextWrap: {
+    flexShrink: 1,
   },
   bubbleMine: {
     backgroundColor: colors.accent,
@@ -188,9 +208,6 @@ const styles = StyleSheet.create({
   },
   receiptRow: {
     paddingHorizontal: 2,
-  },
-  receiptHidden: {
-    opacity: 0.6,
   },
   bubbleText: {
     fontSize: 15,
