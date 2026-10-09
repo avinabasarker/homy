@@ -1,6 +1,5 @@
 import React, { memo, useEffect } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -36,13 +35,32 @@ export interface BubbleProps {
   showTime: boolean;
   /** Aggregated reaction chips for this message: emoji → count. */
   reactions: Map<string, number>;
-  /** Owner smoke-test BUG 3: eye renders on EXACTLY ONE bubble per thread
-   *  — MY most recent message. False on every other bubble, and on peer
-   *  bubbles (so a thread with none of my messages shows no eye at all). */
+  /** ITEM 3: Instagram-style Seen label — renders on EXACTLY ONE bubble per
+   *  thread (MY most recent). Reads from receiptByPeer: undefined = no read
+   *  yet (show NOTHING), or an ISO read_at timestamp. */
   showReceipt: boolean;
-  /** Phase 6 Part C: outline eye = sent, filled accent eye = read. */
-  readByPeer: boolean;
+  readByPeerReadAt?: string;
   onLongPress: (id: string) => void;
+}
+
+function formatSeenRelative(readAt: string): string {
+  const seconds = Math.floor((Date.now() - new Date(readAt).getTime()) / 1000);
+  if (seconds < 60) {
+    return 'Seen just now';
+  }
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) {
+    return `Seen ${mins}m ago`;
+  }
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) {
+    return `Seen ${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `Seen ${days}d ago`;
+  }
+  return `Seen ${Math.floor(days / 7)}w ago`;
 }
 
 function BubbleImpl({
@@ -53,7 +71,7 @@ function BubbleImpl({
   showTime,
   reactions,
   showReceipt,
-  readByPeer,
+  readByPeerReadAt,
   onLongPress,
 }: BubbleProps) {
   const t = useSharedValue(animate ? 0 : 1);
@@ -113,13 +131,9 @@ function BubbleImpl({
             ))}
           </View>
         ) : null}
-        {mine && !item.undecryptable && showReceipt ? (
+        {mine && !item.undecryptable && showReceipt && readByPeerReadAt ? (
           <View style={styles.receiptRow}>
-            <Ionicons
-              name={readByPeer ? 'eye' : 'eye-outline'}
-              size={13}
-              color={readByPeer ? colors.accent : colors.textSecondary}
-            />
+            <Text style={styles.seenText}>{formatSeenRelative(readByPeerReadAt)}</Text>
           </View>
         ) : null}
       </View>
@@ -208,6 +222,11 @@ const styles = StyleSheet.create({
   },
   receiptRow: {
     paddingHorizontal: 2,
+  },
+  seenText: {
+    fontSize: 11,
+    fontFamily: fontFamily.medium,
+    color: colors.textSecondary,
   },
   bubbleText: {
     fontSize: 15,

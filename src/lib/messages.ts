@@ -626,6 +626,7 @@ export async function listTypingPeers(
 export interface ReceiptRow {
   message_id: string;
   reader_id: string;
+  read_at: string;
 }
 
 /** Insert receipts (reader = me) for the given message ids. Idempotent-ish: unique(message_id, reader_id) */
@@ -650,23 +651,24 @@ export async function markMessagesRead(
   }
 }
 
-/** Message ids of MINE that the peer has read. */
-export async function listReadMessageIds(
+/** Message ids of MINE that the peer has read, with the peer's read time
+ *  (ITEM 3: the Seen label renders the relative read time). */
+export async function listReadByPeerLatest(
   conversationId: string,
   myUserId: string,
-): Promise<Set<string>> {
+): Promise<Map<string, string>> {
   const { data, error } = await supabase
     .from('read_receipts')
-    .select('message_id, reader_id')
+    .select('message_id, reader_id, read_at')
     .eq('conversation_id', conversationId);
   if (error) {
-    return new Set();
+    return new Map();
   }
   // A receipt counts when the READER is not me (i.e. the peer read my message).
-  const out = new Set<string>();
+  const out = new Map<string, string>();
   for (const row of (data ?? []) as ReceiptRow[]) {
     if (row.reader_id !== myUserId) {
-      out.add(row.message_id);
+      out.set(row.message_id, row.read_at);
     }
   }
   return out;

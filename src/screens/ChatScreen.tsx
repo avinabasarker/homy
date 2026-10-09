@@ -32,7 +32,7 @@ import {
   ensureOwnOrPeerConversation,
   isEditable,
   listMessages,
-  listReadMessageIds,
+  listReadByPeerLatest,
   listReactions,
   listTypingPeers,
   loadMyIdentityKeys,
@@ -75,7 +75,10 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
   const [sending, setSending] = useState(false);
   const [revealedTimeId, setRevealedTimeId] = useState<string | null>(null);
   const [reactions, setReactions] = useState<Map<string, Map<string, string>>>(new Map());
-  const [readIds, setReadIds] = useState<Set<string>>(new Set());
+  // ITEM 3: messageId → the PEER's read_at (ISO), only receipts by the peer.
+  const [readIds, setReadIds] = useState<Map<string, string>>(new Map());
+  // 30s tick so "Seen just now" rolls over to "Seen 1m ago" while watching.
+  const [seenTick, setSeenTick] = useState(0);
   const [peerTyping, setPeerTyping] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -89,6 +92,13 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
   // Ids present at mount; only messages arriving afterwards animate in.
   const initialIdsRef = useRef<Set<string> | null>(null);
   const prevCountRef = useRef(0);
+
+  // ITEM 3: the Seen label live-rolls over ("just now" → "1m ago") while
+  // the screen is open — bump the label's tick every 30 seconds.
+  useEffect(() => {
+    const timer = setInterval(() => setSeenTick((t) => t + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!userId) {
@@ -150,7 +160,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
       const [thread, reactionList, readSet, typing, hidden] = await Promise.all([
         listMessages(peerUserId, userId, keys),
         listReactions(peerUserId, userId, keys, conversationId).catch(() => []),
-        listReadMessageIds(conversationId, userId).catch(() => new Set<string>()),
+        listReadByPeerLatest(conversationId, userId).catch(() => new Map<string, string>()),
         listTypingPeers(conversationId, userId).catch(() => false),
         listHiddenMessageIds().catch(() => new Set<string>()),
       ]);
@@ -176,6 +186,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
       setReactions(byMessage);
       setReadIds(readSet);
       setPeerTyping(typing);
+      setSeenTick((t) => t + 1);
       // Owner smoke-test BUG 5: locally hidden rows never render. The server
       // row stays untouched — the peer still sees the message.
       setMessages(thread.filter((m) => !hidden.has(m.id)));
@@ -406,7 +417,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           showTime={revealedIdRef.current === item.id}
           reactions={rx}
           showReceipt={item.id === lastMineId}
-          readByPeer={readIds.has(item.id)}
+          readByPeerReadAt={readIds.get(item.id)}
           onLongPress={handleLongPress}
         />
         {actionId === item.id ? (
@@ -533,6 +544,9 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
         <FlatList
           ref={listRef}
           data={messages}
+          // Re-render visible rows when receipts change or the Seen-label
+          // tick fires (ITEM 3 live rollover).
+          extraData={`${readIds.size}:${seenTick}`}
           keyExtractor={(m) => m.id}
           renderItem={renderBubble}
           contentContainerStyle={styles.listContent}
