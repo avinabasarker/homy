@@ -111,7 +111,12 @@ function BubbleImpl({
             entrance,
           ]}
         >
-          <Text style={[styles.bubbleText, styles.bubbleTextWrap]}>
+          <Text
+            style={[styles.bubbleText, styles.bubbleTextWrap]}
+            // ITEM 4: Android's default break strategy splits normal words;
+            // highQuality prefers word boundaries.
+            textBreakStrategy="highQuality"
+          >
             {item.undecryptable ? '🔒 Encrypted message' : item.body}
             {item.editedAt && !item.undecryptable ? ' (edited)' : null}
           </Text>
@@ -162,8 +167,7 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
   bubble: {
-    // Owner smoke-test BUG 7: long words must wrap at word boundaries —
-    // shrinkable container + cap at ~80% of screen width, no fixed widths.
+    // ITEM 4: bubble sizes to content; maxWidth '80%' is the only cap.
     maxWidth: '80%',
     flexShrink: 1,
     borderRadius: 16,
@@ -190,7 +194,11 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 4,
   },
   bubbleColumn: {
+    // ITEM 4: shrink-to-content column — no fixed/percentage width here.
+    // The ROW (flexDirection row) positions it; the bubble's own
+    // maxWidth '80%' is the only cap, so short text stays bubble-small.
     maxWidth: '80%',
+    flexShrink: 1,
     gap: 2,
   },
   columnEnd: {
