@@ -303,7 +303,7 @@ export async function listMessages(
 
 // ---- Edit + delete for everyone (Phase 6) ----
 
-const EDIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour, mirrors the server policy
+const EDIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes, mirrors the server policy (ITEM 5)
 
 export function isEditable(sentAt: string): boolean {
   return Date.now() - new Date(sentAt).getTime() < EDIT_WINDOW_MS;
@@ -311,7 +311,7 @@ export function isEditable(sentAt: string): boolean {
 
 /**
  * Replace the encrypted payload of MY message with a new envelope
- * (server enforces the 1-hour window; a rejection surfaces honestly).
+ * (server enforces the 15-minute window; a rejection surfaces honestly).
  */
 export async function editMessage(
   peerUserId: string,
@@ -337,7 +337,7 @@ export async function editMessage(
     .eq('sender_id', myUserId);
   if (error) {
     if (error.code === '42501') {
-      throw new Error('The 1-hour edit window has closed — the server rejected this edit.');
+      throw new Error('The 15-minute edit window has closed — the server rejected this edit.');
     }
     throw new Error(`Edit failed: ${error.message}`);
   }

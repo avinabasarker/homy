@@ -269,7 +269,7 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           return;
         }
         if (!isEditable(target.sentAt)) {
-          setError('The 1-hour edit window has closed for that message.');
+          setError('The 15-minute edit window has closed for that message.');
           return;
         }
         await editMessage(peerUserId, userId, keys, editingId, text);
@@ -442,7 +442,16 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
                 }}
                 style={styles.actionTextBtn}
               >
-                <Text style={styles.actionTextBtnText}>Edit</Text>
+                {/* ITEM 5: remaining 15-minute window shown inline. */}
+                <Text style={styles.actionTextBtnText}>
+                  {`Edit (${Math.max(
+                    1,
+                    Math.round(
+                      (15 * 60_000 - (Date.now() - new Date(item.sentAt).getTime())) /
+                        60_000,
+                    ),
+                  )}m)`}
+                </Text>
               </Pressable>
             ) : null}
             {mine && !item.undecryptable ? (
