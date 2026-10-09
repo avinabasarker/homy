@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -14,6 +15,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import * as ImagePicker from 'expo-image-picker';
+import {
+  useAudioRecorder,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  getRecordingPermissionsAsync,
+} from 'expo-audio';
+import * as FileSystem from 'expo-file-system/legacy';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -26,6 +35,7 @@ import Animated, {
 
 import { Bubble } from '../components/Bubble';
 import { EmptyState } from '../components/EmptyState';
+import { MediaBubble, purgeMediaForMessage } from '../components/MediaBubble';
 import {
   deleteMessage,
   editMessage,
@@ -49,6 +59,17 @@ import {
 import type { ChatMessage, PairKeys } from '../lib/messages';
 import { fetchPeerIdentityKey } from '../lib/messages';
 import { hideMessageLocally, listHiddenMessageIds } from '../lib/hiddenMessages';
+import { derivePairKey } from '../lib/crypto';
+import {
+  cacheBytes,
+  mediaPath,
+  readBytesFromFile,
+  sealMedia,
+  uploadSealedMedia,
+  getFileSize,
+} from '../lib/media';
+import { compressImage } from '../components/MediaBubble';
+import { sendMediaMessage } from '../lib/messages';
 import { useAuth } from '../state/AuthProvider';
 import { colors, fontFamily, spacing } from '../theme/theme';
 
@@ -373,10 +394,19 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
       const now = Date.now();
       setMessages((prev) =>
         prev.filter((m) => {
-          if (!m.disappearHours || m.disappearHours <= 0) {
-            return true;
+          if (
+            m.disappearHours &&
+            m.disappearHours > 0 &&
+            now - new Date(m.sentAt).getTime() >= m.disappearHours * 3600_000
+          ) {
+            if (m.mediaType) {
+              // Disappearing MEDIA purges the local decrypted cache file too
+              // (Phase 7) — never leave unsealed bytes lying around.
+              void purgeMediaForMessage(m.id);
+            }
+            return false;
           }
-          return now - new Date(m.sentAt).getTime() < m.disappearHours * 3600_000;
+          return true;
         }),
       );
     };
@@ -385,8 +415,228 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
     return () => clearInterval(timer);
   }, []);
 
+    // Phase 7: the pair conversation key, derived when keys/peer keys arrive,
+  // for media seal/unseal (MediaBubble + the send helpers).
+  const conversationKey = useMemo(() => {
+    if (!keys) {
+      return null;
+    }
+    const pk =
+      keys.theirIdentityPublicKey.length > 0
+        ? keys.theirIdentityPublicKey
+        : null;
+    if (!pk) {
+      return null;
+    }
+    return derivePairKey(keys.myIdentitySecretKey, pk, keys.myIdentityPublicKey);
+  }, [keys]);
+
   // Owner smoke-test BUG 3: exactly ONE eye per thread, attached under MY
   // most recent message (right-aligned). No messages of mine → no eye.
+  // Composer: attach menu + voice-record state.
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+
+  // ---- Phase 7: media sending (ITEM 9/10/11) ----
+  // Order of operations per the PRD: validate → read bytes → seal → UPLOAD
+  // → THEN insert the message row. Any failure = no row + honest toast.
+  const [mediaBusy, setMediaBusy] = useState(false);
+
+  const sendMediaFlow = useCallback(
+    async (
+      kind: 'image' | 'video' | 'voice',
+      fileUri: string,
+      extras: { width?: number; height?: number; durationSec?: number; mimeType?: string },
+    ) => {
+      if (!userId || !keys || mediaBusy) {
+        return;
+      }
+      setMediaBusy(true);
+      setError(null);
+      try {
+        const storagePath = mediaPath(conversationId ?? userId);
+        const bytes = await readBytesFromFile(fileUri);
+        const key = derivePairKey(
+          keys.myIdentitySecretKey,
+          keys.theirIdentityPublicKey,
+          keys.myIdentityPublicKey,
+        );
+        const blob = sealMedia(bytes, key);
+        await uploadSealedMedia(storagePath, blob);
+        await sendMediaMessage(
+          peerUserId,
+          userId,
+          keys,
+          storagePath,
+          blob.length,
+          kind,
+          disappearHours,
+          extras,
+        );
+        await reload();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not send the media.');
+      } finally {
+        setMediaBusy(false);
+      }
+    },
+    [userId, keys, conversationId, peerUserId, disappearHours, reload, mediaBusy],
+  );
+
+  const handlePickImage = useCallback(async () => {
+    if (mediaBusy || editingId) {
+      return;
+    }
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      setError('Photo library permission is needed to attach images.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 1,
+      selectionLimit: 1,
+    });
+    if (result.canceled || result.assets.length === 0) {
+      return;
+    }
+    const asset = result.assets[0]!;
+    try {
+      // ITEM 9: resize max dim 1280, JPEG ~0.7; reject >5MB after compression.
+      const compressed = await compressImage(asset.uri);
+      if (!compressed) {
+        setError('Could not process that image — try a different one.');
+        return;
+      }
+      const size = await getFileSize(compressed.uri);
+      if (size > 5 * 1024 * 1024) {
+        setError('That image is still over 5 MB after compression — try a smaller one.');
+        return;
+      }
+      await sendMediaFlow('image', compressed.uri, {
+        width: compressed.width,
+        height: compressed.height,
+        mimeType: 'image/jpeg',
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send that image.');
+    }
+  }, [mediaBusy, editingId, sendMediaFlow]);
+
+  // ITEM 11: voice notes — tap the mic to start, Stop sends, Cancel discards.
+  const [recording, setRecording] = useState(false);
+  const [recSec, setRecSec] = useState(0);
+  const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+
+  const startRecording = async () => {
+    try {
+      const existing = await getRecordingPermissionsAsync();
+      let granted = existing.granted;
+      if (!granted) {
+        granted = (await requestRecordingPermissionsAsync()).granted;
+      }
+      if (!granted) {
+        setError('Microphone permission is needed to record voice notes.');
+        return;
+      }
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      setRecSec(0);
+      setRecording(true);
+      recTimerRef.current = setInterval(() => setRecSec((s) => s + 1), 1000);
+    } catch {
+      setError('Could not start recording.');
+    }
+  };
+
+  const cancelRecording = async () => {
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    try {
+      await recorder.stop();
+      const uri = recorder.uri;
+      if (uri) {
+        await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      }
+    } catch {
+      // discard is best-effort
+    }
+    setRecording(false);
+    setRecSec(0);
+  };
+
+  const stopRecordingAndSend = async () => {
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    try {
+      await recorder.stop();
+      const uri = recorder.uri;
+      setRecording(false);
+      setRecSec(0);
+      if (uri) {
+        // Voice cap: 60 s like videos (honest limit — no trimming exists).
+        if (recSec > 60) {
+          setError('Voice notes are limited to 60 seconds — this one is too long.');
+          return;
+        }
+        const size = await getFileSize(uri);
+        if (size > 50 * 1024 * 1024) {
+          setError('That voice note is too large.');
+          return;
+        }
+        await sendMediaFlow('voice', uri, {
+          durationSec: recSec || undefined,
+          mimeType: 'audio/aac',
+        });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send that voice note.');
+      setRecording(false);
+      setRecSec(0);
+    }
+  };
+
+  const handlePickVideo = useCallback(async () => {
+    if (mediaBusy || editingId) {
+      return;
+    }
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      setError('Photo library permission is needed to attach videos.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['videos'],
+      selectionLimit: 1,
+    });
+    if (result.canceled || result.assets.length === 0) {
+      return;
+    }
+    const asset = result.assets[0]!;
+    const durationSec = asset.duration ?? 0;
+    // ITEM 10: honest hard limits — 60 seconds / 50 MB. Expo Go cannot
+    // compress video, so validation only (documented in the PRD).
+    if (durationSec > 60) {
+      setError('Videos are limited to 60 seconds — this one is too long.');
+      return;
+    }
+    const size = await getFileSize(asset.uri);
+    if (size > 50 * 1024 * 1024) {
+      setError('Videos are limited to 50 MB — this one is too large.');
+      return;
+    }
+    await sendMediaFlow('video', asset.uri, {
+      durationSec: Math.round(durationSec),
+      width: asset.width,
+      height: asset.height,
+      mimeType: asset.mimeType ?? 'video/mp4',
+    });
+  }, [mediaBusy, editingId, sendMediaFlow]);
+
   const lastMineId = useMemo(
     () => messages.findLast((m) => m.senderId === userId)?.id ?? null,
     [messages, userId],
@@ -419,6 +669,8 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           showReceipt={item.id === lastMineId}
           readByPeerReadAt={readIds.get(item.id)}
           onLongPress={handleLongPress}
+          conversationKey={conversationKey ?? undefined}
+          maxBubbleWidth={Math.min(Dimensions.get('window').width * 0.8, 360)}
         />
         {actionId === item.id ? (
           <View style={styles.actionBar}>
@@ -583,34 +835,95 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
             </Pressable>
           </View>
         ) : null}
-        <TextInput
-          style={styles.input}
-          value={draft}
-          onChangeText={handleDraftChange}
-          placeholder={editingId ? 'New text…' : 'Message'}
-          placeholderTextColor={colors.textSecondary}
-          multiline
-          editable={!sending}
-        />
-        <Pressable
-          accessibilityLabel={editingId ? 'Save edit' : 'Send message'}
-          onPress={() => void handleSend()}
-          disabled={!draft.trim() || sending}
-          style={({ pressed }) => [
-            styles.sendButton,
-            (!draft.trim() || sending) && styles.sendDisabled,
-            pressed && styles.sendPressed,
-          ]}
-        >
-          {sending ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
-          ) : (
-            <Text style={styles.sendText}>{editingId ? 'Save' : 'Send'}</Text>
-          )}
-        </Pressable>
+        {showAttachMenu ? (
+          <View style={styles.attachMenu}>
+            <Pressable
+              accessibilityLabel="Attach photo"
+              onPress={() => { setShowAttachMenu(false); void handlePickImage(); }}
+              style={styles.attachOption}
+            >
+              <Ionicons name="image-outline" size={18} color={colors.text} />
+              <Text style={styles.attachOptionText}>Photo</Text>
+            </Pressable>
+            <Pressable
+              accessibilityLabel="Attach video"
+              onPress={() => { setShowAttachMenu(false); void handlePickVideo(); }}
+              style={styles.attachOption}
+            >
+              <Ionicons name="videocam-outline" size={18} color={colors.text} />
+              <Text style={styles.attachOptionText}>Video</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {recording ? (
+          // ITEM 11: recording state — elapsed timer + Cancel + Stop.
+          <View style={styles.recordingRow}>
+            <Pressable accessibilityLabel="Cancel recording" onPress={() => void cancelRecording()}>
+              <Ionicons name="trash-outline" size={22} color="#B84A4A" />
+            </Pressable>
+            <View style={styles.recordingDotWrap}>
+              <View style={styles.recordingDot} />
+              <Text style={styles.recordingTimer}>{formatRecTime(recSec)}</Text>
+            </View>
+            <Pressable accessibilityLabel="Stop recording and send" onPress={() => void stopRecordingAndSend()}>
+              <Ionicons name="stop-circle" size={26} color={colors.accent} />
+            </Pressable>
+          </View>
+        ) : (
+          <>
+            <Pressable
+              accessibilityLabel="Attach media"
+              onPress={() => setShowAttachMenu((v) => !v)}
+              hitSlop={8}
+            >
+              <Ionicons name="add-circle-outline" size={26} color={colors.accent} />
+            </Pressable>
+            <TextInput
+              style={styles.input}
+              value={draft}
+              onChangeText={handleDraftChange}
+              placeholder={editingId ? 'New text…' : 'Message'}
+              placeholderTextColor={colors.textSecondary}
+              multiline
+              editable={!sending}
+            />
+            {draft.trim() ? (
+              <Pressable
+                accessibilityLabel={editingId ? 'Save edit' : 'Send message'}
+                onPress={() => void handleSend()}
+                disabled={!draft.trim() || sending}
+                style={({ pressed }) => [
+                  styles.sendButton,
+                  (!draft.trim() || sending) && styles.sendDisabled,
+                  pressed && styles.sendPressed,
+                ]}
+              >
+                {sending || mediaBusy ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.sendText}>{editingId ? 'Save' : 'Send'}</Text>
+                )}
+              </Pressable>
+            ) : (
+              <Pressable
+                accessibilityLabel="Record voice note"
+                onPress={() => void startRecording()}
+                disabled={sending || mediaBusy}
+                hitSlop={8}
+              >
+                <Ionicons name="mic-circle-outline" size={30} color={colors.accent} />
+              </Pressable>
+            )}
+          </>
+        )}
       </View>
     </KeyboardAvoidingView>
   );
+}
+
+/** 0:07-style recording clock. */
+function formatRecTime(sec: number): string {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 
 /** Three bouncing dots above the composer while the PEER types. */
@@ -848,6 +1161,58 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm,
     gap: spacing.sm,
+  },
+  attachMenu: {
+    position: 'absolute',
+    left: spacing.md,
+    bottom: 76,
+    zIndex: 20,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 4,
+    minWidth: 150,
+  },
+  attachOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+  },
+  attachOptionText: {
+    fontSize: 14,
+    fontFamily: fontFamily.regular,
+    color: colors.text,
+  },
+  recordingRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+  },
+  recordingDotWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  recordingDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#B84A4A',
+  },
+  recordingTimer: {
+    fontSize: 14,
+    fontFamily: fontFamily.semiBold,
+    color: colors.text,
   },
   input: {
     flex: 1,

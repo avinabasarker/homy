@@ -134,6 +134,24 @@ export async function deleteCachedMedia(messageId: string): Promise<void> {
   }
 }
 
+/**
+ * Read a local file (picker output / recorder output) into bytes.
+ * Base64 round-trip through the legacy FileSystem API — the only path that
+ * works in Expo Go on this SDK.
+ */
+export async function readBytesFromFile(uri: string): Promise<Uint8Array> {
+  const b64 = await FileSystem.readAsStringAsync(uri, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  return fromBase64(b64);
+}
+
+/** File size in bytes (the legacy FS info always includes size when exists). */
+export async function getFileSize(uri: string): Promise<number> {
+  const info = await FileSystem.getInfoAsync(uri);
+  return info.exists ? (info as { exists: true; size: number }).size : 0;
+}
+
 // ---- base64 helpers (polyfill-free; RN has atob/btoa shims in polyfills) ----
 
 function toBase64(bytes: Uint8Array): string {

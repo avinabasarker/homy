@@ -8,6 +8,7 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import type { ChatMessage } from '../lib/messages';
+import { MediaBubble } from './MediaBubble';
 import { colors, fontFamily, spacing } from '../theme/theme';
 
 /**
@@ -41,6 +42,10 @@ export interface BubbleProps {
   showReceipt: boolean;
   readByPeerReadAt?: string;
   onLongPress: (id: string) => void;
+  /** Phase 7: 32-byte conversation key for media decrypt (undefined = no media support in this context). */
+  conversationKey?: Uint8Array;
+  /** Screen width available for media sizing (ChatScreen passes window-120). */
+  maxBubbleWidth?: number;
 }
 
 function formatSeenRelative(readAt: string): string {
@@ -73,6 +78,8 @@ function BubbleImpl({
   showReceipt,
   readByPeerReadAt,
   onLongPress,
+  conversationKey,
+  maxBubbleWidth,
 }: BubbleProps) {
   const t = useSharedValue(animate ? 0 : 1);
   // ITEM 7: press feedback — quick spring down to ~0.97 + slight dim,
@@ -125,15 +132,23 @@ function BubbleImpl({
             pressStyle,
           ]}
         >
-          <Text
-            style={[styles.bubbleText, styles.bubbleTextWrap]}
-            // ITEM 4: Android's default break strategy splits normal words;
-            // highQuality prefers word boundaries.
-            textBreakStrategy="highQuality"
-          >
-            {item.undecryptable ? '🔒 Encrypted message' : item.body}
-            {item.editedAt && !item.undecryptable ? ' (edited)' : null}
-          </Text>
+          {item.mediaType && item.media && conversationKey ? (
+            <MediaBubble
+              item={item}
+              conversationKey={conversationKey}
+              maxWidth={maxBubbleWidth ?? 260}
+            />
+          ) : (
+            <Text
+              style={[styles.bubbleText, styles.bubbleTextWrap]}
+              // ITEM 4: Android's default break strategy splits normal words;
+              // highQuality prefers word boundaries.
+              textBreakStrategy="highQuality"
+            >
+              {item.undecryptable ? '🔒 Encrypted message' : item.body}
+              {item.editedAt && !item.undecryptable ? ' (edited)' : null}
+            </Text>
+          )}
           {showTime ? (
             <Text style={styles.bubbleTime}>
               {new Date(item.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

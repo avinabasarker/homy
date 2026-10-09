@@ -75,6 +75,9 @@ export interface ChatMessage {
   undecryptable?: boolean;
   /** Hours after sentAt when this message disappears; null/0 = never. */
   disappearHours?: number | null;
+  /** Phase 7 media attachments. */
+  mediaType?: 'image' | 'video' | 'voice' | null;
+  media?: MediaEnvelopeMeta | null;
 }
 
 // ---- Envelope v1 (Phase 6) ----
@@ -88,19 +91,41 @@ export interface ChatMessage {
 
 export const ENVELOPE_VERSION = 1;
 
-export type EnvelopeType = 'text' | 'reaction';
+export type EnvelopeType = 'text' | 'reaction' | 'image' | 'video' | 'voice';
+
+export interface MediaEnvelopeMeta {
+  storagePath: string;
+  byteSize: number;
+  /** image/video only. */
+  width?: number;
+  height?: number;
+  /** video/voice only, seconds. */
+  durationSec?: number;
+  /** Image MIME when known (image/jpeg after compression). */
+  mimeType?: string;
+}
 
 export interface Envelope {
   v: number;
   type: EnvelopeType;
   body: string;
   disappearHours?: number | null;
+  /** Media messages: plaintext-carried metadata; the blob itself is sealed. */
+  media?: MediaEnvelopeMeta;
 }
 
-function buildEnvelope(body: string, disappearHours: number | null): string {
-  const env: Envelope = { v: ENVELOPE_VERSION, type: 'text', body };
+function buildEnvelope(
+  body: string,
+  disappearHours: number | null,
+  media?: MediaEnvelopeMeta,
+  type: EnvelopeType = 'text',
+): string {
+  const env: Envelope = { v: ENVELOPE_VERSION, type, body };
   if (disappearHours && disappearHours > 0) {
     env.disappearHours = disappearHours;
+  }
+  if (media) {
+    env.media = media;
   }
   return JSON.stringify(env);
 }
@@ -113,6 +138,8 @@ function decodePlain(plain: Uint8Array): {
   body: string;
   disappearHours: number | null;
   isReaction: boolean;
+  mediaType: 'image' | 'video' | 'voice' | null;
+  media: MediaEnvelopeMeta | null;
 } {
   const text = bytesToUtf8(plain);
   try {
@@ -130,12 +157,17 @@ function decodePlain(plain: Uint8Array): {
             ? parsed.disappearHours
             : null,
         isReaction: parsed.type === 'reaction',
+        mediaType:
+          parsed.type === 'image' || parsed.type === 'video' || parsed.type === 'voice'
+            ? parsed.type
+            : null,
+        media: parsed.media ?? null,
       };
     }
   } catch {
     // Not JSON — legacy plain-string message.
   }
-  return { body: text, disappearHours: null, isReaction: false };
+  return { body: text, disappearHours: null, isReaction: false, mediaType: null, media: null };
 }
 
 interface MessageRow {
@@ -297,8 +329,56 @@ export async function listMessages(
       editedAt: row.edited_at ?? null,
       disappearHours: decoded.disappearHours,
       undecryptable: false,
+      mediaType: decoded.mediaType,
+      media: decoded.media,
     } satisfies ChatMessage;
   });
+}
+
+/**
+ * Phase 7 ITEM 8/9–11: send one MEDIA message. The caller (media UI) has
+ * ALREADY sealed + uploaded by the time this is called (validate → read →
+ * seal → UPLOAD → insert row — a failed upload never reaches here).
+ * Disappearing flag travels INSIDE the envelope, like text.
+ */
+export async function sendMediaMessage(
+  peerUserId: string,
+  myUserId: string,
+  keys: PairKeys,
+  storagePath: string,
+  byteSize: number,
+  mediaType: 'image' | 'video' | 'voice',
+  disappearHours: number | null,
+  extras: { width?: number; height?: number; durationSec?: number; mimeType?: string } = {},
+): Promise<void> {
+  const theirPk =
+    keys.theirIdentityPublicKey.length > 0
+      ? keys.theirIdentityPublicKey
+      : await fetchPeerIdentityKey(peerUserId);
+  const pairKey = derivePairKey(
+    keys.myIdentitySecretKey,
+    theirPk,
+    keys.myIdentityPublicKey,
+  );
+  const env = buildEnvelope('', disappearHours, {
+    storagePath,
+    byteSize,
+    ...extras,
+  }, mediaType);
+  const { ciphertext, nonce } = seal(utf8ToBytes(env), pairKey);
+  const conversationId = await ensureConversation(peerUserId);
+  const { error } = await supabase.from('messages').insert({
+    conversation_id: conversationId,
+    sender_id: myUserId,
+    ciphertext: toPostgrestBytea(ciphertext),
+    nonce: toPostgrestBytea(nonce),
+  });
+  if (error) {
+    if (error.code === '42501') {
+      conversationCache.delete(peerUserId);
+    }
+    throw new SendMessageError(error.message, 'insert');
+  }
 }
 
 // ---- Edit + delete for everyone (Phase 6) ----
@@ -386,16 +466,23 @@ export async function listLastMessages(
         const thread = (await listMessages(peerId, myUserId, keys)).filter(
           (m) => !hiddenIds.has(m.id),
         );
-        const last = thread[thread.length - 1];
-        if (!last) {
-          map.set(peerId, { body: '', sentAt: null, fromMe: false });
-        } else {
-          map.set(peerId, {
-            body: last.undecryptable ? '🔒 Encrypted message' : last.body,
-            sentAt: last.sentAt,
-            fromMe: last.senderId === myUserId,
-          });
-        }
+        const last = thread[thread.length - 1];        if (!last) {
+            map.set(peerId, { body: '', sentAt: null, fromMe: false });
+          } else {
+            map.set(peerId, {
+              body: last.undecryptable
+                ? '🔒 Encrypted message'
+                : last.mediaType === 'image'
+                  ? '📷 Photo'
+                  : last.mediaType === 'video'
+                    ? '🎬 Video'
+                    : last.mediaType === 'voice'
+                      ? '🎤 Voice message'
+                      : last.body,
+              sentAt: last.sentAt,
+              fromMe: last.senderId === myUserId,
+            });
+          }
       } catch {
         // Preview is decorative — a failed conversation never breaks the list.
         map.set(peerId, { body: '', sentAt: null, fromMe: false });
