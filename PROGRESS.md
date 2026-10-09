@@ -50,29 +50,62 @@
    Realtime INSERT refreshes.
 
 ### Phase 6 owner tests — ONE phone, account switching
-1. **Legacy history survives**: open any pre-Phase-6 chat. EXPECT all old
-   messages render as text (NOT 🔒). Send a new one — renders normally.
-2. **Reactions (self)**: long-press a bubble → EXPECT the 6-emoji bar.
-   Tap ❤️ → EXPECT a ❤️ chip under the bubble. Long-press → tap ❤️ again
-   → EXPECT the chip gone (toggle). Long-press → tap 👍 → EXPECT chip
-   switches to 👍 (replace, not duplicate).
-3. **Edit**: long-press your OWN recent message → Edit → change text →
-   Save. EXPECT the bubble shows the new text + " (edited)".
-4. **Edit window**: (after 1 h, or skip if impractical) Edit on an older
-   own message is NOT offered; if attempted via a stale UI, an honest
-   1-hour-window error appears.
-5. **Delete for everyone**: long-press own message → Delete. EXPECT the
-   bubble vanishes locally AND for the peer (simulate: log in as the
-   other account and open the chat — the message is gone).
-6. **Disappearing**: hourglass → 60 seconds (test) → send "vanish".
-   EXPECT the bubble gone from BOTH views within ~60 s (watch it purge on
-   the 60 s timer). Switch back to Off afterwards.
-7. **Typing (SQL sim)**: with the chat open as alice, run the typing SQL
-   below. EXPECT three bouncing dots above the composer within ~1 s, and
-   they disappear ≤10 s later or when the row flips to false.
-8. **Receipts (SQL sim)**: alice sends a message with her chat closed on
-   bob's side; run the receipt SQL below as "bob read it". Open as alice
-   → EXPECT the eye icon on that message turns filled/accent.
+(Updated after the smoke-test bugfix round: steps 1–9 cover the seven
+ BUGs found on device; steps 10–13 cover the Phase 6 features and realtime)
+
+**Bugfix regression (BUG 1–7):**
+1. **Self-chat integrity (BUG 1/2 — the crosswire)**: log in as alice_test,
+   open bob's chat, then back out and open "Saved messages (you)".
+   EXPECT ONLY messages alice sent to herself — correct count, all
+   decrypting. It MUST NOT show the alice↔bob history or 🔒 rows.
+2. **Cross-account cache (BUG 1/2)**: without restarting the app, log out
+   → log in as bob_test → open "Saved messages (you)". EXPECT bob's own
+   self-chat (empty if unused), never alice's rows, never 🔒.
+3. **History on open (BUG 2)**: as either account, open any chat with
+   existing history. EXPECT the thread renders immediately on open — never
+   a blank thread waiting for a new send.
+4. **One eye only (BUG 3)**: in a thread with several of my messages,
+   EXPECT exactly ONE eye icon, under MY most recent message, right-
+   aligned; outline (unread) or filled/accent (read). If I have no
+   messages in the thread, no eye anywhere.
+5. **Reaction replace (BUG 4)**: long-press a bubble → tap ❤️. Long-press
+   again → tap 👍. EXPECT the chip becomes 👍 in ONE tap (no doubles), and
+   server still has exactly one row for me on that message.
+6. **Delete confirm + delete-for-me (BUG 5)**: long-press own message →
+   Delete. EXPECT the 3-choice dialog (Cancel / Delete for everyone /
+   Delete for me).
+   - "Delete for everyone": row is gone for both accounts (no tombstone).
+   - "Delete for me": message vanishes from MY thread (permanently —
+     reopen the chat / cold-restart to confirm), but is still visible to
+     the peer. It must reappear for the peer even after my app restart.
+7. **Edit reachable (BUG 6)**: long-press my own message < 1 h old →
+   Edit → composer switches to edit mode → Save. EXPECT the new text on
+   both accounts + a subtle "(edited)" tag. On a message older than 1 h,
+   Edit is not offered; a stale-client attempt surfaces the honest
+   server rejection text.
+8. **Long words wrap (BUG 7)**: send a single 60-char word
+   (e.g. "Supercalifragilisticexpialidocious-and-then-some-more-letters").
+   EXPECT the bubble caps at ~80% width and wraps at natural word
+   boundaries (with a break for the single long word) — never blowing out
+   the screen or hard-splitting TWO words together mid-line.
+9. **Old history still decrypts**: open any pre-envelope chat → all
+   legacy rows render as text (NOT 🔒).
+
+**Phase 6 features (realtime via SQL sims):**
+10. **Typing (SQL sim)**: with the chat open as alice, run the typing SQL
+   below. EXPECT three bouncing dots above the composer within ~1 s; the
+   dots disappear ≤10 s later (stale expiry) or when the row flips false.
+    alice's own typing must never show her dots.
+11. **Reaction chips live**: as bob (second login), react to alice's
+    message; reopen as alice with the chat OPEN before bob reacts
+    (or just verify after reload) — the ❤️ chip appears under the bubble,
+    decrypted from the sealed payload.
+12. **Live eye-fill**: alice sends a message with bob's chat NOT open; run
+    the receipt SQL below; open alice's chat → the eye under her most
+    recent message turns filled/accent.
+13. **Disappearing**: hourglass → "60 seconds (test)" (__DEV__ only —
+    release builds must not show it) → send "vanish". EXPECT the bubble
+    gone from BOTH views within ~60 s. Switch back to Off afterwards.
 
 ### SQL snippets (Supabase SQL editor — ids resolved by USERNAME, no uuids)
 
