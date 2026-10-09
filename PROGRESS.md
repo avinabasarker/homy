@@ -449,7 +449,7 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - [x] Phase 4 — E2EE Messaging Core (conversation creation FIXED — server RPC)
 - [x] Phase 5 — Chat UX (Pixel-Perfect)
 - [x] Phase 6 — Interactions
-- [ ] Phase 7 — Media & Voice
+- [x] Phase 7 — Media & Voice (code complete; owner tests below)
 - [ ] Phase 8 — Multi-Device, Ship & Infra
 
 ## Rule changes live in the DB (repository synced; owner decision)
@@ -465,5 +465,110 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - **PRD_AND_RULES.md is NOT in the repo** — file missing at this path;
   the owner's rule text is recorded here until that file lands.
 
-**Next step:** owner runs the Phase 3–6 owner tests (Phase 6 list is
-single-device, with typing/receipt SQL simulations).
+**Next step:** owner runs the Phase 7 owner tests below, then the
+Section 1/2 regression list.
+
+---
+
+## Phase 7 — Media & Voice (code complete, awaiting owner tests)
+
+**Shipped:**
+- ITEM 8 plumbing (`src/lib/media.ts`): nonce‖secretbox seal/unseal with the
+  existing conversation key, `conv/<conversationId>/<uuid>.enc` paths,
+  RLS-session uploads, per-message cache files under cacheDirectory,
+  cache-first reads, purge helper, file-read/size helpers. Round-trip
+  verified locally (bytes in = bytes out; tamper / wrong-key / truncated
+  all rejected without crashing).
+- ITEM 9 images: picker → resize max 1280, JPEG ~0.7 → >5MB rejected
+  honestly → seal/upload/insert. Bubble renders by envelope aspect ratio
+  (maxWidth 80%, maxHeight ~300), tap → full-screen dark viewer, tap closes.
+- ITEM 10 videos: ≤60 s AND ≤50 MB validated with plain-language rejections
+  (no compression in Expo Go — PRD 4.4 documents the Phase 8 deferral);
+  tap-to-play in the viewer modal.
+- ITEM 11 voice notes: mic button → recording bar (elapsed clock, Cancel
+  discards + deletes the temp file, Stop sends) → play/pause + tap-scrub +
+  duration in the bubble.
+- Order of operations held everywhere: validate → read → seal → UPLOAD →
+  THEN insert the row; upload failure = no row + honest error.
+- Disappearing media inherits `disappearHours` (flag rides INSIDE the
+  encrypted envelope) and the purge now deletes the local decrypted cache
+  file too.
+- Undecryptable/tampered media renders a 🔒 locked placeholder — never a
+  crash.
+
+### Phase 7 owner tests (ONE phone, account switching; SQL looks up ids
+### by username — no hardcoded uuids)
+
+Run SQL in the Supabase SQL editor as you go.
+
+1. **Image alice→bob:** alice attaches a photo → bob switches in, opens
+   the thread, photo decrypts and matches.
+2. **Voice note:** alice records (Stop to send) → bob plays, scrubs,
+   pauses. Also: start recording → Cancel → nothing is sent and nothing
+   appears after restart.
+3. **Video limits:** pick a >60 s video → "Videos are limited to 60
+   seconds…"; a prepared >50 MB file → honest large-file error.
+4. **Full-screen viewer:** tap an image → dark modal, tap to close.
+5. **Restart + cache:** view an image, force-close, cut connectivity,
+   reopen → renders from cache (airplane-mode check optional).
+6. **Self-chat media:** send alice→alice a photo + voice note → decrypt
+   and render only inside "Saved messages (you)".
+7. **Disappearing media purge:** 60 s (test) mode in `__DEV__`, send an
+   image, wait ~70 s → gone from the thread AND no decrypted cache file
+   left behind.
+
+**Simulated peer receipt (Seen label — Section 1 regression):**
+```sql
+-- after alice sends one message:
+insert into read_receipts (message_id, conversation_id, reader_id, read_at)
+select m.id, m.conversation_id, p.id, now()
+from messages m
+join conversations c on c.id = m.conversation_id
+join profiles p on p.username = 'bob_test'
+where m.sender_id = (select id from profiles where username = 'alice_test')
+  and (select id from profiles where username = 'alice_test')
+      in (c.user_a, c.user_b)
+order by m.sent_at desc
+limit 1;
+```
+→ EXPECT "Seen just now" live on alice's device, rolling to "Seen 1m ago"
+within a minute of watching.
+
+**Backdated message hides Edit:**
+```sql
+update messages
+set sent_at = now() - interval '16 minutes'
+where id = (
+  select m.id
+  from messages m
+  join conversations c on c.id = m.conversation_id
+  join profiles p on p.username = 'alice_test'
+  where m.sender_id = p.id
+    and p.id in (c.user_a, c.user_b)
+  order by m.sent_at desc
+  limit 1
+);
+```
+→ EXPECT the Edit option gone (15-minute window closed) for that message.
+
+**Delete-for-me restart-proof:** long-press → "Delete for me" → gone for
+alice, visible to bob; force-close/reopen → still gone for alice, still
+there for bob; the messages row remains in the SQL editor.
+
+**Word-wrap trio:** normal sentence never splits mid-word; one 40-char
+word may break (acceptable); short replies keep bubble-hugging sizes.
+
+### Regression list (Sections 1/2)
+- [ ] Old (pre-envelope) text messages still decrypt and render.
+- [ ] Reactions toggle off on repeat tap; different emoji replaces in one
+      tap; chips show counts.
+- [ ] Edited tags show "(edited)"; edits blocked past 15 minutes (honest
+      server-rejection toast).
+- [ ] Disappearing messages still vanish on the purge tick.
+- [ ] Seen label: exactly ONE per thread, under MY latest message, live
+      30s rollover; none when no receipt exists.
+- [ ] Delete-for-everyone still removes the row for both sides.
+
+**Documented deviations:** Expo Go video-compression deferral and the
+Phase 8 media-cleanup Edge Function (per the owner's PRD edits, recorded
+above).
