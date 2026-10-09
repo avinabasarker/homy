@@ -452,5 +452,18 @@ Using the exact tweetnacl operations from crypto.ts with two fresh keypairs:
 - [ ] Phase 7 — Media & Voice
 - [ ] Phase 8 — Multi-Device, Ship & Infra
 
+## Rule changes live in the DB (repository synced; owner decision)
+- **Editing window: 15 MINUTES** (was 1 hour). Server policy
+  `messages_update_own` now enforces `sent_at > now() - interval '15
+  minutes'` — mirrored in supabase/schema.sql. Client-side edit gating
+  matches (messages.ts / ChatScreen).
+- **Videos (rule 4.4)**: max 60 seconds, hard 50MB cap. 480p compression
+  needs a native build — DEFERRED to the Phase 8 EAS decision. Expo Go
+  gets validated size-capped uploads only (no fake compression).
+- **Media cleanup Edge Function: DEFERRED to Phase 8** (needs the owner's
+  interactive `supabase login`).
+- **PRD_AND_RULES.md is NOT in the repo** — file missing at this path;
+  the owner's rule text is recorded here until that file lands.
+
 **Next step:** owner runs the Phase 3–6 owner tests (Phase 6 list is
 single-device, with typing/receipt SQL simulations).

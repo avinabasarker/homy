@@ -371,6 +371,7 @@ export async function listLastMessages(
   peerIds: string[],
   myUserId: string,
   keys: PairKeys,
+  hiddenIds: Set<string> = new Set(),
 ): Promise<Map<string, ThreadPreview>> {
   // Guard: a self-chat preview reads the self conversation with the self key
   // only — never another conversation (owner smoke-test BUG 1).
@@ -381,7 +382,10 @@ export async function listLastMessages(
   await Promise.all(
     peerIds.map(async (peerId) => {
       try {
-        const thread = await listMessages(peerId, myUserId, keys);
+        // Locally hidden rows ("Delete for me") also vanish from previews.
+        const thread = (await listMessages(peerId, myUserId, keys)).filter(
+          (m) => !hiddenIds.has(m.id),
+        );
         const last = thread[thread.length - 1];
         if (!last) {
           map.set(peerId, { body: '', sentAt: null, fromMe: false });

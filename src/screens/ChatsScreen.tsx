@@ -14,6 +14,7 @@ import { TextField } from '../components/TextField';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { useSocialGraph } from '../hooks/useSocialGraph';
 import { ChatScreen } from './ChatScreen';
+import { listHiddenMessageIds } from '../lib/hiddenMessages';
 import { listLastMessages, loadMyIdentityKeys } from '../lib/messages';
 import type { ThreadPreview } from '../lib/messages';
 import type { AddFriendResult } from '../lib/social';
@@ -101,10 +102,17 @@ export function ChatsScreen() {
           return;
         }
         const peerIds = [...contacts.map((c) => c.userId), userId];
-        const map = await listLastMessages(peerIds, userId, {
-          ...mine,
-          theirIdentityPublicKey: new Uint8Array(0),
-        });
+        // Previews honor "Delete for me" hides too (ITEM 1).
+        const hidden = await listHiddenMessageIds().catch(() => new Set<string>());
+        const map = await listLastMessages(
+          peerIds,
+          userId,
+          {
+            ...mine,
+            theirIdentityPublicKey: new Uint8Array(0),
+          },
+          hidden,
+        );
         if (!cancelled) {
           setPreviews(map);
         }

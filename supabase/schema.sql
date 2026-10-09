@@ -324,9 +324,37 @@ create policy "reactions_delete_own" on public.message_reactions
 grant all on public.message_reactions to authenticated, service_role;
 alter publication supabase_realtime add table public.message_reactions;
 
--- 2) Enforce the 1-hour edit window SERVER-side (client checks are bypassable)
+-- 2) Enforce the 15-minute edit window SERVER-side (client checks are bypassable)
 drop policy "messages_update_own" on public.messages;
 create policy "messages_update_own" on public.messages
   for update to authenticated
-  using (sender_id = auth.uid() and sent_at > now() - interval '1 hour')
+  using (sender_id = auth.uid() and sent_at > now() - interval '15 minutes')
   with check (sender_id = auth.uid());
+
+-- 3) Private media bucket 'homy-media' (owner deployed to the live DB).
+-- Path convention: conv/<conversationId>/<randomUUID>.enc
+-- RLS keyed to is_participant(split_part(name,'/',2)::uuid, auth.uid())
+-- with a conv/<uuid>/ regex guard — participants may upload/read only
+-- their own conversation's paths. Repository copy written from the
+-- owner's description; server is source of truth.
+insert into storage.buckets (id, name, public)
+values ('homy-media', 'homy-media', false)
+on conflict (id) do nothing;
+
+create policy "media_select_participants" on storage.objects
+  for select to authenticated
+  using (
+    bucket_id = 'homy-media'
+    and (storage.foldername(name))[1] = 'conv'
+    and name ~ '^conv/[0-9a-fA-F-]{36}/[^/]+\\.enc$'
+    and public.is_participant(((storage.foldername(name))[2])::uuid, auth.uid())
+  );
+
+create policy "media_insert_participants" on storage.objects
+  for insert to authenticated
+  with check (
+    bucket_id = 'homy-media'
+    and (storage.foldername(name))[1] = 'conv'
+    and name ~ '^conv/[0-9a-fA-F-]{36}/[^/]+\\.enc$'
+    and public.is_participant(((storage.foldername(name))[2])::uuid, auth.uid())
+  );
