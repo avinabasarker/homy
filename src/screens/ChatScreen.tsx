@@ -557,9 +557,18 @@ export function ChatScreen({ peerUserId, peerUsername, onBack }: ChatScreenProps
           // tick fires (ITEM 3 live rollover).
           extraData={`${readIds.size}:${seenTick}`}
           keyExtractor={(m) => m.id}
+          // ITEM 7 memoization: Bubble rows are React.memo'd and onLongPress
+          // is a stable useCallback, so receipt/typing/reaction reloads
+          // don't re-render every bubble.
           renderItem={renderBubble}
           contentContainerStyle={styles.listContent}
+          // ITEM 7: open/new-message scrolling is ANIMATED, never a teleport.
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+          keyboardShouldPersistTaps="handled"
+          removeClippedSubviews
+          initialNumToRender={12}
+          maxToRenderPerBatch={12}
+          windowSize={11}
         />
       )}
 

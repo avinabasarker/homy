@@ -9,6 +9,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, { FadeInDown } from 'react-native-reanimated';
 
 import { TextField } from '../components/TextField';
 import { PrimaryButton } from '../components/PrimaryButton';
@@ -152,11 +153,14 @@ export function ChatsScreen() {
 
   if (openChat && userId) {
     return (
-      <ChatScreen
-        peerUserId={openChat.peerUserId}
-        peerUsername={openChat.peerUsername}
-        onBack={() => setOpenChat(null)}
-      />
+      // ITEM 7: quick ~200ms slide/fade into the chat instead of a hard cut.
+      <Animated.View style={styles.chatScrim} entering={FadeInDown.duration(200)}>
+        <ChatScreen
+          peerUserId={openChat.peerUserId}
+          peerUsername={openChat.peerUsername}
+          onBack={() => setOpenChat(null)}
+        />
+      </Animated.View>
     );
   }
 
@@ -356,6 +360,10 @@ export function ChatsScreen() {
 
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  chatScrim: {
     flex: 1,
     backgroundColor: colors.background,
   },

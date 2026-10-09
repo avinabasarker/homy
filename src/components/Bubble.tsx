@@ -75,6 +75,9 @@ function BubbleImpl({
   onLongPress,
 }: BubbleProps) {
   const t = useSharedValue(animate ? 0 : 1);
+  // ITEM 7: press feedback — quick spring down to ~0.97 + slight dim,
+  // restored on release. Runs on the UI thread, 60fps.
+  const press = useSharedValue(1);
 
   useEffect(() => {
     if (animate) {
@@ -93,6 +96,11 @@ function BubbleImpl({
     ],
   }));
 
+  const pressStyle = useAnimatedStyle(() => ({
+    opacity: press.value < 0.99 ? 0.85 : 1,
+    transform: [{ scale: press.value }],
+  }));
+
   return (
     <Pressable
       accessibilityLabel={
@@ -100,7 +108,12 @@ function BubbleImpl({
       }
       onLongPress={() => onLongPress(item.id)}
       delayLongPress={250}
-      style={({ pressed }) => [styles.row, mine ? styles.rowMine : null, pressed && styles.rowPressed]}
+      onPressIn={() => {
+        press.value = withSpring(0.97, { damping: 30, stiffness: 400 });
+      }}
+      onPressOut={() => {
+        press.value = withSpring(1, { damping: 16, stiffness: 260 });
+      }}
     >
       <View style={[styles.bubbleColumn, mine ? styles.columnEnd : null]}>
         <Animated.View
@@ -109,6 +122,7 @@ function BubbleImpl({
             mine ? styles.bubbleMine : styles.bubbleTheirs,
             lastOfGroup && (mine ? styles.tailMine : styles.tailTheirs),
             entrance,
+            pressStyle,
           ]}
         >
           <Text
@@ -162,9 +176,6 @@ const styles = StyleSheet.create({
   },
   rowMine: {
     justifyContent: 'flex-end',
-  },
-  rowPressed: {
-    opacity: 0.8,
   },
   bubble: {
     // ITEM 4: bubble sizes to content; maxWidth '80%' is the only cap.
